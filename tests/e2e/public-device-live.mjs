@@ -7,7 +7,7 @@ const browser=await chromium.launch({executablePath:await chromiumBinary.executa
 try {
  const page=await browser.newPage({acceptDownloads:true,viewport:{width:1280,height:800}});const errors=[];
  page.on('pageerror',e=>errors.push(e.message));page.on('console',m=>{if(m.type()==='error' && m.text().includes('Content Security Policy'))errors.push(m.text());});
- const response=await page.goto('https://xypisxdlxcqyavixdiji.supabase.co/functions/v1/demo2/');assert.equal(response.status(),200);
+ const response=await page.goto('https://bizuming1-ui.github.io/xingyi-isolated-test/device/');assert.equal(response.status(),200);
  await page.getByText('以下两份代码仅供硬件验证，不能连接界面1').waitFor();
  const promise=page.waitForEvent('download');await page.getByRole('button',{name:'下载候选项目 ZIP'}).click();
  const download=await promise;assert.equal(download.suggestedFilename(),'xingyi-device-candidate.zip');

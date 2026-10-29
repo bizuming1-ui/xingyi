@@ -2,7 +2,7 @@
 set -eu
 export VITE_SUPABASE_URL='https://xypisxdlxcqyavixdiji.supabase.co'
 export VITE_SUPABASE_ANON_KEY='sb_publishable_Wn_srpPJ3lIYOMWwDASRyQ_mqp37Pnc'
-export VITE_PUBLIC_APP_URL='https://xypisxdlxcqyavixdiji.supabase.co/functions/v1/demo1/'
+export VITE_PUBLIC_APP_URL='https://bizuming1-ui.github.io/xingyi-isolated-test/'
 export VITE_DEVICE_PREVIEW='true'
 export VITE_DEVICE_CONFIRM_PREVIEW='false'
 export VITE_ISOLATED_DEVICE_TEST='true'

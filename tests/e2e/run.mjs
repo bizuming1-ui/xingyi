@@ -33,7 +33,7 @@ try {
  await runSuite(5277,false,'device-download.mjs');
  await runSuite(5278,true,'device-provision-preview.mjs');
  await runSuite(5279,true,'first-setup-preview.mjs',false,true);
- await runSuite(5280,true,'isolated-qr.mjs',false,true,'https://xypisxdlxcqyavixdiji.supabase.co/functions/v1/demo1/');
+ await runSuite(5280,true,'isolated-qr.mjs',false,true,'https://bizuming1-ui.github.io/xingyi-isolated-test/');
  await runSuite(5281,true,'isolated-qr.mjs',false,true,'',true);
- await runSuite(5282,false,'public-edge-demo.mjs');
+ await runSuite(5282,false,'public-pages-demo.mjs');
 } finally {rmSync(temp,{recursive:true,force:true});}

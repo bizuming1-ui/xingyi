@@ -1,9 +1,12 @@
 # Isolated demo deployment status
 
-The checked-in HTML is a candidate artifact, not an available public website.
-The embedded `demo1` URL was a trial placeholder. Supabase Edge Functions force
-HTML responses to `text/plain` and `Content-Security-Policy: default-src 'none'; sandbox`,
-so the two trial functions were removed. The placeholder must be changed to
-an approved static hosting URL, and both artifacts rebuilt before publishing.
-The isolated-site-probe workflow is manual until a real hosting target exists.
-No production Pages or production database was changed by this experiment.
+These checked-in HTML files are candidate artifacts and are not a published
+site. They are built specifically for the independent public GitHub Pages
+repository `bizuming1-ui/xingyi-isolated-test` (not the production repository).
+Its owner must create and enable Pages separately and upload `index.html` and
+`device/index.html`. Only the isolated test Supabase project is configured.
+Do not use this build as a production site or enter production credentials.
+The manual `Isolated public test pages` workflow checks live content and QR
+only after that site exists. Real phone scanning and ESP32 operation require
+separate hardware validation. Former Supabase Edge Function attempts were
+removed because its gateway serves HTML as sandboxed plain text.

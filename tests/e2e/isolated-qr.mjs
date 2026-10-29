@@ -22,7 +22,7 @@ try {
  await page.addInitScript(s=>localStorage.setItem(location.pathname.includes('public-demo')?'sb-xypisxdlxcqyavixdiji-auth-token':'sb-example-auth-token',JSON.stringify(s)),session);await page.goto(process.env.TEST_BASE_URL+(artifact?'/public-demo/index.html':''));
  const img=page.getByAltText('扫描进入隔离测试列表');await img.waitFor();
  const src=await img.getAttribute('src');const png=PNG.sync.read(Buffer.from(src.split(',')[1],'base64'));const decoded=jsQR(new Uint8ClampedArray(png.data),png.width,png.height);
- assert.equal(decoded?.data,'https://xypisxdlxcqyavixdiji.supabase.co/functions/v1/demo1/');
+ assert.equal(decoded?.data,'https://bizuming1-ui.github.io/xingyi-isolated-test/');
  await page.getByRole('button',{name:/TEST/}).click();await page.getByAltText('扫描进入隔离测试列表').waitFor();
  console.log(artifact?'public demo artifact QR passed':'isolated public QR encodes isolated demo URL');
 } finally {await browser.close();}
