@@ -1,5 +1,6 @@
 // Compile-only integration of the components; do not flash as production firmware.
 #include <Arduino.h>
+#include <Preferences.h> // Expose dependency to PlatformIO Library Dependency Finder.
 #include "../../../firmware/include/ButtonCounter.h"
 #include "../../../firmware/include/PreferencesCounterStorage.h"
 
