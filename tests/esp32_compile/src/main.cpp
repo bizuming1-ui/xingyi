@@ -13,6 +13,7 @@
 #include "../../../firmware/include/HttpRpcExchange.h"
 #include "../../../firmware/include/EspWifiEntropy.h"
 #include "../../../firmware/include/EspWifiStation.h"
+#include "../../../firmware/include/DeviceInput.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -38,6 +39,7 @@ HttpRpcExchange fixtureHttp(fixtureTls,"project123.supabase.co","sb_publishable_
 FixtureExchange fixtureExchange;
 FreeRtosSyncMailbox mailbox;
 SyncController* controller = nullptr;
+DeviceInput* deviceInput = nullptr;
 SyncNetworkWorker networkWorker(mailbox,fixtureExchange,"0000000000000000000000000000000000000000000000000000000000000000");
 FixtureEpochs epochs;
 EspWifiStation wifiStation;
@@ -50,13 +52,14 @@ volatile bool compileOnlyExercise = false;
 
 void setup() {
   pinMode(4, INPUT_PULLUP);
-  if (storage.begin() && counter.load() == DurableCounter::Result::Ok) { planner = new SyncPlanner(counter,epochs); if (mailbox.valid()) controller = new SyncController(*planner,mailbox); }
+  if (storage.begin() && counter.load() == DurableCounter::Result::Ok) { planner = new SyncPlanner(counter,epochs); if (mailbox.valid()) controller = new SyncController(*planner,mailbox); deviceInput = new DeviceInput(counter,*planner); }
 }
 void loop() {
   observed += button.tick(digitalRead(4) == LOW, millis());
   // Force real ESP32 compilation/linking of the unfinished component API.
   // This branch defaults to false; this project is still not a usable firmware.
-  if (compileOnlyExercise && planner && controller) {
+  if (compileOnlyExercise && planner && controller && deviceInput) {
+    (void)deviceInput->tick(digitalRead(4)==LOW,millis());
     wifiSupervisor.step(millis());
     char randomEpoch[37]{};
     (void)hardwareEpochs.generate(randomEpoch);
