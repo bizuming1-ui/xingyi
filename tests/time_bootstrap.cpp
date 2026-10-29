@@ -57,22 +57,26 @@ int main(int argc,char** argv){
  }
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::Ok);
  assert(seconds>=1704067200ULL && seconds<=4102444800ULL && tcp.state()==NonblockingTcp::State::Idle && !proof.nonce());
+ assert(bootstrap.lastStage()==TimeBootstrapExchange::Stage::Complete && bootstrap.lastDetail()==0);
  TrustedTimeWindow window(clock,10000,1000);TimeWindowSynchronizer sync(clock,window,bootstrap);
  assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000)==R::Ok);
  TrustedTimeWindow::Bounds bounds{};assert(window.bounds(bounds));
  assert(bounds.earliestMs>=1704067200000ULL && bounds.latestMs>bounds.earliestMs);
  assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",3000)==R::InvalidProof);
- assert(!window.bounds(bounds));
+ assert(!window.bounds(bounds));assert(sync.lastStage()==TimeBootstrapExchange::Stage::Proof);
  seconds=42;
  assert(bootstrap.fetch("wrong.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::Unavailable && seconds==42);
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",wrongCa.c_str(),id,secret,3000,seconds)==R::Unavailable && seconds==42);
+ assert(bootstrap.lastStage()==TimeBootstrapExchange::Stage::TlsHandshake && bootstrap.lastDetail()!=0);
  const int calls=backend.calls;
  assert(bootstrap.fetch("project123.supabase.co","sb_secret_test",ca.c_str(),id,secret,3000,seconds)==R::Unavailable && backend.calls==calls);
+ assert(bootstrap.lastStage()==TimeBootstrapExchange::Stage::Validate);
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",3000,seconds)==R::InvalidProof && seconds==42);
  entropy.pattern=0x11;
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::InvalidProof && seconds==42);
  entropy.pattern=0x10;
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,200,seconds)==R::Timeout && seconds==42);
+ assert(bootstrap.lastStage()==TimeBootstrapExchange::Stage::Receive);
  assert(tcp.state()==NonblockingTcp::State::Idle && !proof.nonce());
  std::cout<<"time-only bootstrap: date exception, CA/host checks, proof and timeout passed\n";
 }

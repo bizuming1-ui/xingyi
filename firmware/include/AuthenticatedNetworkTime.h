@@ -11,8 +11,16 @@ class AuthenticatedNetworkTime final : public NetworkTimeService {
                            const char* key,const char* ca,const char* deviceId,const char* secret,uint32_t timeoutMs)
     :window_(window),sync_(sync),host_(host),key_(key),ca_(ca),deviceId_(deviceId),secret_(secret),timeout_(timeoutMs){}
   bool trusted() override {TrustedTimeWindow::Bounds b{};return sync_.usesWindow(window_) && window_.bounds(b);}
-  bool refresh() override {if(!sync_.usesWindow(window_))return false;return sync_.refresh(host_,key_,ca_,deviceId_,secret_,timeout_)==TimeBootstrapExchange::Result::Ok && trusted();}
+  bool refresh() override {
+    if(!sync_.usesWindow(window_))return false;
+    lastResult_=sync_.refresh(host_,key_,ca_,deviceId_,secret_,timeout_);
+    return lastResult_==TimeBootstrapExchange::Result::Ok && trusted();
+  }
+  int lastStage() const {return static_cast<int>(sync_.lastStage());}
+  int lastDetail() const {return sync_.lastDetail();}
+  int lastResult() const {return static_cast<int>(lastResult_);}
   void invalidate() override {window_.invalidate();}
  private:
   TrustedTimeWindow& window_;TimeWindowSynchronizer& sync_;const char *host_,*key_,*ca_,*deviceId_,*secret_;uint32_t timeout_;
+  TimeBootstrapExchange::Result lastResult_=TimeBootstrapExchange::Result::Unavailable;
 };

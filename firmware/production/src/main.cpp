@@ -45,10 +45,11 @@ GuardedWifiSupervisor* networkWifi=nullptr;
 AuthenticatedNetworkTime* networkTime=nullptr;
 std::atomic<bool> stopNetwork{false};
 std::atomic<bool> radioOnline{false},timeTrusted{false};
+std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
-uint32_t lastStatus=0;
+uint32_t lastStatus=0,lastDiagnostic=0;
 
 // Console output is best-effort and never waits for an attached terminal. No
 // secret, SSID, device ID, production-order UUID or request body is printed.
@@ -67,6 +68,9 @@ void networkTask(void*) {
     const bool online=networkWifi->state()==WifiSupervisor::State::Online;
     radioOnline.store(online,std::memory_order_relaxed);
     timeTrusted.store(online && networkTime->trusted(),std::memory_order_relaxed);
+    timeStage.store(networkTime->lastStage(),std::memory_order_relaxed);
+    timeResult.store(networkTime->lastResult(),std::memory_order_relaxed);
+    timeDetail.store(networkTime->lastDetail(),std::memory_order_relaxed);
     vTaskDelay(1);
   }
   vTaskDelete(nullptr);
@@ -139,6 +143,13 @@ void loop() {
       snprintf(info,sizeof(info),"WIFI=%d TIME=%d BOUND=%d PENDING=%llu",radioOnline.load()?1:0,timeTrusted.load()?1:0,counter.isReady()?1:0,static_cast<unsigned long long>(counter.pending()));
       status(info);
     }
+  }
+  // Emit only numeric failure stage/result/detail, never credentials or data.
+  // Offset from the main status line so a small serial buffer can drain.
+  if(radioOnline.load() && !timeTrusted.load() && now-lastDiagnostic>=5000 && now-lastStatus>=2000) {
+    lastDiagnostic=now;char diag[64];
+    snprintf(diag,sizeof(diag),"TIME_DIAG stage=%d result=%d code=%d",timeStage.load(),timeResult.load(),timeDetail.load());
+    status(diag);
   }
   delay(1);
 }

@@ -14,15 +14,20 @@ class TimeWindowSynchronizer {
   TimeWindowSynchronizer(const TimeWindowSynchronizer&)=delete;
   TimeWindowSynchronizer& operator=(const TimeWindowSynchronizer&)=delete;
   bool usesWindow(const TrustedTimeWindow& window) const {return &window_==&window;}
+  TimeBootstrapExchange::Stage lastStage() const {return stage_;}
+  int lastDetail() const {return detail_;}
   TimeBootstrapExchange::Result refresh(const char* host,const char* key,const char* ca,
                                        const char* deviceId,const char* secret,uint32_t timeoutMs) {
-    window_.invalidate();uint64_t before=0,after=0,seconds=0;
+    stage_=TimeBootstrapExchange::Stage::Clock;detail_=0;window_.invalidate();uint64_t before=0,after=0,seconds=0;
     if(!window_.usesClock(clock_) || !clock_.read(before))return TimeBootstrapExchange::Result::Unavailable;
     const auto result=bootstrap_.fetch(host,key,ca,deviceId,secret,timeoutMs,seconds);
+    stage_=bootstrap_.lastStage();detail_=bootstrap_.lastDetail();
     if(result!=TimeBootstrapExchange::Result::Ok)return result;
+    stage_=TimeBootstrapExchange::Stage::Clock;detail_=0;
     if(!clock_.read(after) || !window_.acceptVerified(seconds,before,after))return TimeBootstrapExchange::Result::Unavailable;
-    return TimeBootstrapExchange::Result::Ok;
+    stage_=TimeBootstrapExchange::Stage::Complete;return TimeBootstrapExchange::Result::Ok;
   }
  private:
   MonotonicMillis64& clock_;TrustedTimeWindow& window_;TimeBootstrapExchange& bootstrap_;
+  TimeBootstrapExchange::Stage stage_=TimeBootstrapExchange::Stage::Idle;int detail_=0;
 };

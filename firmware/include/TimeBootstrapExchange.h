@@ -21,6 +21,12 @@
 class TimeBootstrapExchange {
  public:
   enum class Result { Ok, Timeout, Unavailable, InvalidProof };
+  // Non-sensitive diagnostics only; never expose the device secret, hash,
+  // device ID, request, response body, hostname or nonce.
+  enum class Stage { Idle=0, Validate=1, Entropy=2, Connect=3, TlsConfig=4,
+                     TlsHandshake=5, Send=6, Receive=7, Proof=8, Clock=9, Complete=10 };
+  Stage lastStage() const {return stage_;}
+  int lastDetail() const {return detail_;}
   TimeBootstrapExchange(ConnectionClock& clock,NetworkYield& scheduler,NonblockingTcp& tcp,
                         ResolvedTcpConnect& resolved,TimeProof& proof)
     :clock_(clock),scheduler_(scheduler),tcp_(tcp),resolved_(resolved),proof_(proof){}
@@ -28,11 +34,14 @@ class TimeBootstrapExchange {
   TimeBootstrapExchange& operator=(const TimeBootstrapExchange&)=delete;
   Result fetch(const char* host,const char* key,const char* ca,const char* deviceId,const char* secret,
                uint32_t timeoutMs,uint64_t& seconds) {
+    stage_=Stage::Validate;detail_=0;
     if(!timeoutMs || timeoutMs>TimeProof::MAX_ROUND_TRIP_MS || !validKey(key) || !ca ||
        !resolved_.usesTransport(tcp_) || resolved_.state()!=ResolvedTcpConnect::State::Idle ||
        tcp_.state()!=NonblockingTcp::State::Idle)return Result::Unavailable;
     const uint32_t start=clock_.nowMillis();
+    stage_=Stage::Entropy;
     if(!proof_.begin(deviceId,secret,start))return Result::Unavailable;
+    stage_=Stage::Connect;
     if(!resolved_.begin(host,443,start,timeoutMs)){proof_.clear();return Result::Unavailable;}
     struct Close {ResolvedTcpConnect& r;TimeProof& p;~Close(){r.close();p.clear();}} cleanup{resolved_,proof_};
     if(expired(start,timeoutMs))return Result::Timeout;
@@ -44,14 +53,15 @@ class TimeBootstrapExchange {
       if(state!=ResolvedTcpConnect::State::Resolving && state!=ResolvedTcpConnect::State::Connecting)return Result::Unavailable;
       scheduler_.yield();
     }
-    Context ctx;
+    Context ctx;stage_=Stage::TlsConfig;
     if(!setup(ctx,resolved_.hostname(),ca))return expired(start,timeoutMs)?Result::Timeout:Result::Unavailable;
     if(expired(start,timeoutMs))return Result::Timeout;
+    stage_=Stage::TlsHandshake;
     for(;;) {
       const int rc=mbedtls_ssl_handshake(&ctx.ssl);
       if(expired(start,timeoutMs))return Result::Timeout;
-      if(rc==0){if(!ctx.sawLeaf || mbedtls_ssl_get_verify_result(&ctx.ssl)!=0)return Result::Unavailable;break;}
-      if(rc!=MBEDTLS_ERR_SSL_WANT_READ && rc!=MBEDTLS_ERR_SSL_WANT_WRITE)return Result::Unavailable;
+      if(rc==0){const uint32_t flags=mbedtls_ssl_get_verify_result(&ctx.ssl);if(!ctx.sawLeaf || flags!=0){detail_=static_cast<int>(flags);return Result::Unavailable;}break;}
+      if(rc!=MBEDTLS_ERR_SSL_WANT_READ && rc!=MBEDTLS_ERR_SSL_WANT_WRITE){detail_=rc;return Result::Unavailable;}
       scheduler_.yield();
     }
     char body[160]{};if(!TimeProofCodec::request(proof_,body,sizeof(body)))return Result::Unavailable;
@@ -60,25 +70,26 @@ class TimeBootstrapExchange {
       "POST /rest/v1/rpc/device_time_proof HTTP/1.1\r\nHost: %s\r\napikey: %s\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %lu\r\n\r\n",
       resolved_.hostname(),key,static_cast<unsigned long>(strlen(body)));
     if(n<0 || static_cast<size_t>(n)>=sizeof(headers))return Result::Unavailable;
+    stage_=Stage::Send;
     Result sent=writeAll(ctx,headers,static_cast<size_t>(n),start,timeoutMs);
     if(sent!=Result::Ok)return sent;
     sent=writeAll(ctx,body,strlen(body),start,timeoutMs);
     if(sent!=Result::Ok)return sent;
-    char reply[256]{},block[256]{};HttpResponseDecoder parser(reply,sizeof(reply));
+    char reply[256]{},block[256]{};HttpResponseDecoder parser(reply,sizeof(reply));stage_=Stage::Receive;
     for(;;) {
       if(expired(start,timeoutMs))return Result::Timeout;
       const int rc=mbedtls_ssl_read(&ctx.ssl,reinterpret_cast<unsigned char*>(block),sizeof(block));
       if(expired(start,timeoutMs))return Result::Timeout;
       if(rc==MBEDTLS_ERR_SSL_WANT_READ || rc==MBEDTLS_ERR_SSL_WANT_WRITE){scheduler_.yield();continue;}
-      if(rc<=0 || static_cast<size_t>(rc)>sizeof(block))return Result::Unavailable;
+      if(rc<=0 || static_cast<size_t>(rc)>sizeof(block)){detail_=rc;return Result::Unavailable;}
       const auto parsed=parser.feed(block,static_cast<size_t>(rc));
       if(parsed==HttpResponseDecoder::Result::Complete){
-        if(parser.statusCode()!=200)return Result::Unavailable;
-        uint64_t verified=0;
+        if(parser.statusCode()!=200){detail_=parser.statusCode();return Result::Unavailable;}
+        stage_=Stage::Proof;uint64_t verified=0;
         const bool ok=TimeProofCodec::response(proof_,reply,parser.length(),clock_.nowMillis(),verified);
         if(expired(start,timeoutMs))return Result::Timeout;
         if(!ok)return Result::InvalidProof;
-        seconds=verified;return Result::Ok;
+        seconds=verified;stage_=Stage::Complete;return Result::Ok;
       }
       if(parsed!=HttpResponseDecoder::Result::Incomplete)return Result::Unavailable;
     }
@@ -91,6 +102,7 @@ class TimeBootstrapExchange {
     ~Context(){mbedtls_ssl_free(&ssl);mbedtls_ssl_config_free(&config);mbedtls_x509_crt_free(&ca);mbedtls_ctr_drbg_free(&rng);mbedtls_entropy_free(&entropy);}
   };
   ConnectionClock& clock_;NetworkYield& scheduler_;NonblockingTcp& tcp_;ResolvedTcpConnect& resolved_;TimeProof& proof_;
+  Stage stage_=Stage::Idle;int detail_=0;
   bool expired(uint32_t start,uint32_t limit){return static_cast<uint32_t>(clock_.nowMillis()-start)>=limit;}
   static int verifyTimeOnly(void* p,mbedtls_x509_crt* cert,int depth,uint32_t* flags) {
     if(!p || !cert || !flags || depth<0)return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
