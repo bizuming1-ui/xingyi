@@ -18,8 +18,21 @@ jobs:
           cat "$RUNNER_TEMP/verify.txt"
           awk '/-----BEGIN CERTIFICATE-----/{n++;p=1} p{print > ("'"$RUNNER_TEMP"'/cert-" n ".pem")} /-----END CERTIFICATE-----/{p=0}' "$RUNNER_TEMP/chain.txt"
           for cert in "$RUNNER_TEMP"/cert-*.pem; do openssl x509 -in "$cert" -noout -subject -issuer -dates -fingerprint -sha256; done
-          openssl verify -show_chain -verify_hostname "$host" -CAfile /etc/ssl/certs/ca-certificates.crt -untrusted "$RUNNER_TEMP/chain.txt" "$RUNNER_TEMP/cert-1.pem"
-          curl --silent --show-error --max-time 15 --dump-header - --output /dev/null \
+          verified=$(openssl verify -show_chain -verify_hostname "$host" -CAfile /etc/ssl/certs/ca-certificates.crt -untrusted "$RUNNER_TEMP/chain.txt" "$RUNNER_TEMP/cert-1.pem")
+          echo "$verified"
+          echo "::notice title=Verified chain::${verified//$'\n'/' | '}"
+          last=$(ls "$RUNNER_TEMP"/cert-*.pem | sort -V | tail -1)
+          issuer=$(openssl x509 -in "$last" -noout -issuer -nameopt RFC2253 | sed 's/^issuer=//')
+          root=''
+          for cert in /etc/ssl/certs/*.pem; do
+            subject=$(openssl x509 -in "$cert" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/^subject=//' || true)
+            if [[ "$subject" == "$issuer" ]]; then root="$cert"; break; fi
+          done
+          test -n "$root" || { echo 'Could not identify root from operating system trust store'; exit 1; }
+          echo "::notice title=Trusted root identity::$(openssl x509 -in "$root" -noout -subject -fingerprint -sha256 | tr '\n' ' ')"
+          echo "::notice title=Trusted root PEM base64::$(base64 -w0 "$root")"
+          curl --silent --show-error --max-time 15 --dump-header "$RUNNER_TEMP/headers.txt" --output /dev/null \
             -H 'apikey: sb_publishable_Wn_srpPJ3lIYOMWwDASRyQ_mqp37Pnc' -H 'Content-Type: application/json' \
             --data '{"p_device":"00000000-0000-4000-8000-000000000001","p_nonce":"0000000000000000000000000000000000000000000000000000000000000000"}' \
             "https://$host/rest/v1/rpc/device_time_proof"
+          echo "::notice title=Endpoint response headers::$(grep -Ei '^(HTTP/|content-length:|transfer-encoding:|content-type:)' "$RUNNER_TEMP/headers.txt" | tr '\r\n' ' ')"

@@ -8,6 +8,7 @@ import {publicAppUrl} from './public-url.js';
 import {DevicePanel} from './DevicePanel.jsx';
 import {DeviceConfirmationPanel} from './DeviceConfirmationPanel.jsx';
 import {DeviceProvisionPanel} from './DeviceProvisionPanel.jsx';
+import {TestSetup} from './TestSetup.jsx';
 import './style.css';
 
 const url=import.meta.env.VITE_SUPABASE_URL, key=import.meta.env.VITE_SUPABASE_ANON_KEY;
@@ -59,6 +60,7 @@ function App(){
  if(!db)return <main className="center"><h1>尚未配置数据库</h1><p>请按照 README 配置 Supabase 和部署环境变量。</p></main>;
  if(!session)return <main className="center"><form className="panel login" onSubmit={login}><h1>{isolatedTest?'界面1 · 隔离测试':'界面1'}</h1>{isolatedTest&&<p>当前连接独立测试数据库，不会显示或修改正式生产数据。</p>}<p>请使用管理员在 Supabase 中创建的系统共享账号登录。邮箱地址相同，并不代表可以使用 Gmail 等邮箱的密码登录。</p><label>邮箱<input type="email" value={email} onChange={e=>setEmail(e.target.value)} required /></label><label>密码<input type="password" value={password} onChange={e=>setPassword(e.target.value)} required /></label><button disabled={busy}>登录</button><p role="alert">{message}</p><p><a href="https://github.com/bizuming1-ui/xingyi/blob/arena/f7a2470b-xingyi/README.md#当前项目的首次配置" target="_blank" rel="noreferrer">首次使用或登录遇到问题？</a></p></form></main>;
  if(access.userId!==session.user.id || access.status==='checking')return <main className="center"><p role="status">正在验证共享账号权限…</p></main>;
+ if(isolatedTest && access.status==='denied')return <TestSetup db={db} onDone={()=>setAccessRetry(x=>x+1)}/>;
  if(access.status!=='allowed')return <main className="center"><section className="panel login"><h1>共享账号尚未就绪</h1><p role="alert">{access.status==='error'?'无法检查账号权限，请检查网络并重试。':'账号已登录，但尚未被绑定为系统共享账号。请管理员按首次配置说明完成绑定。'}</p><p><a href="https://github.com/bizuming1-ui/xingyi/blob/arena/f7a2470b-xingyi/README.md#当前项目的首次配置" target="_blank" rel="noreferrer">查看首次配置说明</a></p><button onClick={()=>setAccessRetry(x=>x+1)}>重新检查</button>{' '}<button onClick={()=>db.auth.signOut()}>退出登录</button></section></main>;
  return <main><header><span>{isolatedTest?'界面1 · 隔离测试':'界面1 · 生产管理'}</span><div><span className="sync">● {sync}</span><button className="link" onClick={()=>db.auth.signOut()}>退出登录</button></div></header>
  {page==='list'&&<section className="list panel"><div className="listhead"><div><h1>生产单</h1><p>选择生产单开始操作</p></div><div className="list-actions"><button onClick={()=>edit(null)}>＋ 新建生产单</button>{qr&&<img className="qr-small" src={qr} alt="扫描进入正式生产单列表" title={qrUrl}/>}</div></div><div className="orders">{activeOrders.slice(listIndex*3,listIndex*3+3).map(o=><button className="order-card" key={o.id} onClick={()=>openOrder(o)}><strong title={o.order_no}>{o.order_no}</strong><span title={o.product}>{o.product}</span><span>{o.current_count} / {o.total}</span><b>›</b></button>)}{!activeOrders.length&&<p>暂无生产单，请由管理员新建。</p>}</div><Pager page={listIndex} total={activeOrders.length} onChange={setListPage}/><button className="archive-link" onClick={()=>{setPage('archive');setArchivePage(0);setAdmin('');setMessage('')}}>管理员：查看归档和历史记录 →</button></section>}
