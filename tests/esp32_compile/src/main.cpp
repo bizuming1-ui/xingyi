@@ -17,6 +17,7 @@
 #include "../../../firmware/include/EspAsyncDnsBackend.h"
 #include "../../../firmware/include/EspTcpOps.h"
 #include "../../../firmware/include/ResolvedTcpConnect.h"
+#include "../../../firmware/include/MbedTlsSession.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -50,6 +51,7 @@ NonblockingTcp rawTcp(tcpOps);
 EspAsyncDnsBackend dnsBackend;
 AsyncDns dns(dnsBackend);
 ResolvedTcpConnect resolvedTcp(dns,rawTcp);
+MbedTlsSession tlsSession(rawTcp);
 EspWifiStation wifiStation;
 WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
 EspWifiEntropy hardwareEntropy;
@@ -73,6 +75,9 @@ void loop() {
     const uint8_t fixtureIp[]={127,0,0,1};
     if(rawTcp.start(fixtureIp,443,millis(),1000)){(void)rawTcp.poll(millis());rawTcp.close();}
     if(resolvedTcp.begin("project123.supabase.co",443,millis(),1000)){(void)resolvedTcp.poll(millis());resolvedTcp.close();}
+    (void)tlsSession.begin("project123.supabase.co","fixture CA",false);
+    (void)tlsSession.handshake();
+    tlsSession.reset();
     wifiSupervisor.step(millis());
     char randomEpoch[37]{};
     (void)hardwareEpochs.generate(randomEpoch);

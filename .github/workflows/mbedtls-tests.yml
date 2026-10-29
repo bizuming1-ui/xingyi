@@ -1,0 +1,20 @@
+name: TLS session tests
+on:
+  pull_request:
+    paths: ['firmware/**', 'tests/mbedtls_session.cpp', 'tests/run-mbedtls-tests.py', 'tests/mocks/lwip/**', '.github/workflows/mbedtls-tests.yml']
+permissions:
+  contents: read
+jobs:
+  verified-local-tls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch and verify mbedTLS source
+        run: |
+          curl -fsSL https://codeload.github.com/Mbed-TLS/mbedtls/tar.gz/refs/tags/v2.28.10 -o "$RUNNER_TEMP/mbedtls.tar.gz"
+          echo '0f2e0525903a89ae1d39ce439d858be66933bda54c5b6102b72a29ed8fe7c088  '"$RUNNER_TEMP/mbedtls.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/mbedtls"
+          tar xzf "$RUNNER_TEMP/mbedtls.tar.gz" -C "$RUNNER_TEMP/mbedtls" --strip-components=1
+          make -C "$RUNNER_TEMP/mbedtls/library" -j2
+      - name: Exercise verified TLS against local server
+        run: MBEDTLS_DIR="$RUNNER_TEMP/mbedtls" python3 tests/run-mbedtls-tests.py
