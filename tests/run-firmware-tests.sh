@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+workdir=$(mktemp -d)
+trap 'rm -rf "$workdir"' EXIT
+for test in button_counter durable_counter preferences_counter_storage; do
+  g++ -std=c++17 -Wall -Wextra -Werror -I tests/mocks "tests/$test.cpp" -o "$workdir/$test"
+  "$workdir/$test"
+done
