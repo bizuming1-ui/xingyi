@@ -8,6 +8,7 @@
 #include "../../../firmware/include/RpcCodec.h"
 #include "../../../firmware/include/RpcWorker.h"
 #include "../../../firmware/include/FreeRtosSyncMailbox.h"
+#include "../../../firmware/include/HttpResponseDecoder.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -38,6 +39,11 @@ void loop() {
   // Force real ESP32 compilation/linking of the unfinished component API.
   // This branch defaults to false; this project is still not a usable firmware.
   if (compileOnlyExercise && planner && controller) {
+    char responseBuffer[32]{};
+    HttpResponseDecoder httpResponse(responseBuffer,sizeof(responseBuffer));
+    const char sample[]="HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
+    (void)httpResponse.feed(sample,sizeof(sample)-1);
+    (void)httpResponse.finish();
     controller->step(millis());
     networkWorker.step();
     (void)counter.bind("00000000-0000-4000-8000-000000000001", 1,
