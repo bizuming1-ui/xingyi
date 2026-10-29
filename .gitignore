@@ -10,3 +10,6 @@ dist/
 
 # Private local device configuration
 firmware/production/src/config.local.h
+
+# Isolated demo build staging
+.demo-output/

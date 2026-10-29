@@ -7,8 +7,8 @@ import {fileURLToPath} from 'node:url';
 
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url)));
 const temp=mkdtempSync(join(tmpdir(),'xingyi-e2e-'));
-async function runSuite(port,preview,testFile,confirm=false,isolated=false) {
- const server=spawn(process.execPath,[join(root,'node_modules/vite/bin/vite.js'),'--host','127.0.0.1','--port',String(port),'--strictPort'],{cwd:root,env:{...process.env,VITE_SUPABASE_URL:'https://example.supabase.co',VITE_SUPABASE_ANON_KEY:'test-publishable-key',VITE_DEVICE_PREVIEW:preview?'true':'false',VITE_DEVICE_CONFIRM_PREVIEW:confirm?'true':'false',VITE_ISOLATED_DEVICE_TEST:isolated?'true':'false'},stdio:['ignore','pipe','pipe']});
+async function runSuite(port,preview,testFile,confirm=false,isolated=false,publicUrl='',artifact=false) {
+ const server=spawn(process.execPath,[join(root,'node_modules/vite/bin/vite.js'),'--host','127.0.0.1','--port',String(port),'--strictPort'],{cwd:root,env:{...process.env,VITE_SUPABASE_URL:'https://example.supabase.co',VITE_SUPABASE_ANON_KEY:'test-publishable-key',VITE_DEVICE_PREVIEW:preview?'true':'false',VITE_DEVICE_CONFIRM_PREVIEW:confirm?'true':'false',VITE_ISOLATED_DEVICE_TEST:isolated?'true':'false',VITE_PUBLIC_APP_URL:publicUrl},stdio:['ignore','pipe','pipe']});
  try {
   await new Promise((done,fail)=>{
    const timer=setTimeout(()=>fail(new Error('Vite did not start within 30 seconds')),30000);
@@ -16,7 +16,7 @@ async function runSuite(port,preview,testFile,confirm=false,isolated=false) {
    server.stderr.on('data',chunk=>process.stderr.write(chunk));
    server.on('exit',code=>{clearTimeout(timer);fail(new Error(`Vite exited before startup: ${code}`))});
   });
-  const child=spawn(process.execPath,[join(root,'tests/e2e',testFile)],{cwd:root,env:{...process.env,TEST_BASE_URL:`http://127.0.0.1:${port}`,LD_LIBRARY_PATH:`${join(temp,'lib')}:${process.env.LD_LIBRARY_PATH||''}`},stdio:'inherit'});
+  const child=spawn(process.execPath,[join(root,'tests/e2e',testFile)],{cwd:root,env:{...process.env,TEST_BASE_URL:`http://127.0.0.1:${port}`,DEMO_ARTIFACT:artifact?'true':'false',LD_LIBRARY_PATH:`${join(temp,'lib')}:${process.env.LD_LIBRARY_PATH||''}`},stdio:'inherit'});
   const code=await new Promise((done,fail)=>{child.on('error',fail);child.on('exit',code=>done(code??1))});
   if(code!==0)throw new Error(`${testFile} failed: ${code}`);
  } finally {
@@ -33,4 +33,6 @@ try {
  await runSuite(5277,false,'device-download.mjs');
  await runSuite(5278,true,'device-provision-preview.mjs');
  await runSuite(5279,true,'first-setup-preview.mjs',false,true);
+ await runSuite(5280,true,'isolated-qr.mjs',false,true,'https://xypisxdlxcqyavixdiji.supabase.co/functions/v1/demo1/');
+ await runSuite(5281,true,'isolated-qr.mjs',false,true,'',true);
 } finally {rmSync(temp,{recursive:true,force:true});}

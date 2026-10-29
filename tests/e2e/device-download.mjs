@@ -10,7 +10,7 @@ try {
  const page=await browser.newPage({acceptDownloads:true});
  for(const viewport of [{width:1280,height:800},{width:390,height:844}]) {
   await page.setViewportSize(viewport);
-  await page.goto(`${base}/device/`);await page.getByText('仅供硬件验证，不能用于生产计数').waitFor();
+  await page.goto(`${base}/device/`);await page.getByText('以下两份代码仅供硬件验证，不能连接界面1').waitFor();
   const ini=await readFile(resolve('firmware/hardware-test/platformio.ini'),'utf8');
   const cpp=await readFile(resolve('firmware/hardware-test/src/main.cpp'),'utf8');
   assert.equal(await page.getByLabel('platformio.ini 代码').inputValue(),ini);

@@ -1,0 +1,2 @@
+# Generated single-file demo contains minified JS string literals with significant whitespace.
+public-demo/index.html -diff
