@@ -52,6 +52,7 @@ try {
  assert.equal(decoded?.data,`${origin}/`,'QR must encode the actual application URL');
  await page.getByRole('button',{name:/TEST-ORDER/}).click();
  await page.getByLabel('现在',{exact:true}).waitFor();
+ assert.equal(await page.getByRole('button',{name:'设备预览'}).count(),0,'device preview must be disabled by default');
  assert.equal(await page.locator('.field').filter({hasText:'当前生产数'}).locator('input').inputValue(),'95');
  await assertSingleScreen(page,'order');
  await page.getByLabel('现在',{exact:true}).fill('10');

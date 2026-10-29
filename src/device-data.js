@@ -43,7 +43,7 @@ export class DeviceData {
 // invalidates late completions from previous runs, including errors. A slow
 // network can exceed the interval: this is not a one-second delivery guarantee.
 export class DeviceMonitor {
-  constructor(data,{interval=500,setTimer=setTimeout,clearTimer=clearTimeout}={}) {
+  constructor(data,{interval=500,setTimer=(fn,ms)=>globalThis.setTimeout(fn,ms),clearTimer=id=>globalThis.clearTimeout(id)}={}) {
     if(!Number.isFinite(interval) || interval<200)throw new Error('刷新间隔无效。');
     this.data=data;this.interval=interval;this.setTimer=setTimer;this.clearTimer=clearTimer;this.generation=0;this.timer=null;
   }
