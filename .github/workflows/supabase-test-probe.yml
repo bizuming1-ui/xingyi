@@ -30,7 +30,7 @@ jobs:
           test -n "$root" || { echo "::error::Could not identify trusted root: $root_subject"; exit 1; }
           echo "::notice title=Trusted root identity::$(openssl x509 -in "$root" -noout -subject -fingerprint -sha256 | tr '\n' ' ')"
           echo "::notice title=Trusted root PEM base64::$(base64 -w0 "$root")"
-          curl --silent --show-error --max-time 15 --dump-header "$RUNNER_TEMP/headers.txt" --output /dev/null \
+          curl --http1.1 --silent --show-error --max-time 15 --dump-header "$RUNNER_TEMP/headers.txt" --output /dev/null \
             -H 'apikey: sb_publishable_Wn_srpPJ3lIYOMWwDASRyQ_mqp37Pnc' -H 'Content-Type: application/json' \
             --data '{"p_device":"00000000-0000-4000-8000-000000000001","p_nonce":"0000000000000000000000000000000000000000000000000000000000000000"}' \
             "https://$host/rest/v1/rpc/device_time_proof"

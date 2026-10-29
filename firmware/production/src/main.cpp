@@ -41,7 +41,10 @@ DurableCounter counter(storage);
 SyncController* controller=nullptr;
 DeviceInput* input=nullptr;
 NetworkTaskCoordinator* network=nullptr;
+GuardedWifiSupervisor* networkWifi=nullptr;
+AuthenticatedNetworkTime* networkTime=nullptr;
 std::atomic<bool> stopNetwork{false};
+std::atomic<bool> radioOnline{false},timeTrusted{false};
 bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
@@ -60,18 +63,22 @@ bool validCa(const char* pem) {
 void networkTask(void*) {
   while(!stopNetwork.load(std::memory_order_acquire)) {
     network->step();
+    // Updates are informational only; they cannot prove a live freeze lease.
+    const bool online=networkWifi->state()==WifiSupervisor::State::Online;
+    radioOnline.store(online,std::memory_order_relaxed);
+    timeTrusted.store(online && networkTime->trusted(),std::memory_order_relaxed);
     vTaskDelay(1);
   }
   vTaskDelete(nullptr);
 }
 const char* statusName(DeviceInput::Status s) {
   switch(s) {
-    case DeviceInput::Status::Ready:return "STATUS: ready; local counts may still be pending";
-    case DeviceInput::Status::Unbound:return "STATUS: no binding; presses rejected";
+    case DeviceInput::Status::Ready:return "STATUS: ready; counts may be pending";
+    case DeviceInput::Status::Unbound:return "STATUS: unbound; presses rejected";
     case DeviceInput::Status::ReleaseRequired:return "STATUS: release button before counting";
-    case DeviceInput::Status::StorageError:return "FAULT: storage failure; counting stopped; do not erase NVS";
-    case DeviceInput::Status::CapacityFull:return "FAULT: counter full; counting stopped";
-    case DeviceInput::Status::Fault:return "FAULT: synchronization state; counting stopped; do not erase NVS";
+    case DeviceInput::Status::StorageError:return "FAULT: NVS error; do not erase";
+    case DeviceInput::Status::CapacityFull:return "FAULT: counter full; stopped";
+    case DeviceInput::Status::Fault:return "FAULT: sync stopped; do not erase NVS";
   }
   return "FAULT: unknown input state";
 }
@@ -79,11 +86,11 @@ const char* statusName(DeviceInput::Status s) {
 void setup() {
   Serial.begin(115200);
   pinMode(BUTTON_PIN,INPUT_PULLUP);
-  if(!config.valid() || !validCa(config.ca)) {startupFault="FAULT: incomplete or invalid local configuration; counting stopped";status(startupFault);return;}
-  if(!storage.begin() || counter.load()!=DurableCounter::Result::Ok) {startupFault="FAULT: NVS load failed; counting stopped; do not erase NVS";status(startupFault);return;}
+  if(!config.valid() || !validCa(config.ca)) {startupFault="FAULT: check local config or CA";status(startupFault);return;}
+  if(!storage.begin() || counter.load()!=DurableCounter::Result::Ok) {startupFault="FAULT: NVS load failed; do not erase";status(startupFault);return;}
   static FreeRtosRadioLifecycleLock lock;
   static FreeRtosSyncMailbox mailbox;
-  if(!lock.valid() || !mailbox.valid()) {startupFault="FAULT: task primitives unavailable; counting stopped";status(startupFault);return;}
+  if(!lock.valid() || !mailbox.valid()) {startupFault="FAULT: task primitives unavailable";status(startupFault);return;}
   static EspWifiEntropy hardwareEntropy;
   static GuardedEntropy countEntropy(lock,hardwareEntropy), networkEntropy(lock,hardwareEntropy);
   static RandomEpochSource epochs(countEntropy);
@@ -104,14 +111,14 @@ void setup() {
   static TimeWindowSynchronizer sync(monotonic,window,bootstrap);
   static AuthenticatedNetworkTime time(window,sync,config.host,config.key,config.ca,config.deviceId,config.secret,NETWORK_TIMEOUT_MS);
   static NetworkTaskCoordinator coordinator(clock,wifi,time,worker);
-  controller=&countController;input=&button;network=&coordinator;
-  if(controller->faulted()) {startupFault="FAULT: initial state invalid; counting stopped";status(startupFault);return;}
+  controller=&countController;input=&button;network=&coordinator;networkWifi=&wifi;networkTime=&time;
+  if(controller->faulted()) {startupFault="FAULT: initial state invalid";status(startupFault);return;}
   TaskHandle_t handle=nullptr;
   if(xTaskCreatePinnedToCore(networkTask,"xingyi-net",NETWORK_STACK_BYTES,nullptr,1,&handle,0)!=pdPASS || !handle) {
-    startupFault="FAULT: network task unavailable; counting stopped";status(startupFault);return;
+    startupFault="FAULT: network task unavailable";status(startupFault);return;
   }
   initialized=true;
-  status("Candidate firmware started; serial status is not production monitoring");
+  status("Test candidate started; do not use in production");
 }
 void loop() {
   if(!initialized){const uint32_t now=millis();if(now-lastStatus>=5000){lastStatus=now;status(startupFault);}delay(100);return;}
@@ -120,9 +127,18 @@ void loop() {
   controller->step(now);
   if(controller->faulted() || sample.status==DeviceInput::Status::StorageError || sample.status==DeviceInput::Status::CapacityFull || sample.status==DeviceInput::Status::Fault)
     stopNetwork.store(true,std::memory_order_release);
-  if(sample.status!=priorStatus || now-lastStatus>=5000) {
+  const bool changed=sample.status!=priorStatus;
+  if(changed) {
     priorStatus=sample.status;lastStatus=now;
-    status(controller->faulted()?"FAULT: synchronization state; counting stopped; do not erase NVS":statusName(sample.status));
+    status(controller->faulted()?"FAULT: sync stopped; do not erase NVS":statusName(sample.status));
+  } else if(now-lastStatus>=5000) {
+    lastStatus=now;
+    if(controller->faulted()) status("FAULT: sync stopped; do not erase NVS");
+    else {
+      char info[64];
+      snprintf(info,sizeof(info),"WIFI=%d TIME=%d BOUND=%d PENDING=%llu",radioOnline.load()?1:0,timeTrusted.load()?1:0,counter.isReady()?1:0,static_cast<unsigned long long>(counter.pending()));
+      status(info);
+    }
   }
   delay(1);
 }
