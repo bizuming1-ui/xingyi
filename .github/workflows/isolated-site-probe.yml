@@ -1,0 +1,22 @@
+name: Isolated public test pages
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check public HTML and immutable artifact hashes
+        shell: bash
+        run: |
+          set -eu
+          base=https://xypisxdlxcqyavixdiji.supabase.co/functions/v1
+          for demo in demo1 demo2; do
+            code=$(curl -sS --max-time 30 -o "$demo.html" -w '%{http_code}' "$base/$demo/")
+            echo "$demo status: $code"
+            if [ "$code" != 200 ]; then head -c 1000 "$demo.html"; exit 1; fi
+          done
+          echo '0b61902c0b9d04236299a9b8401068896d90e994677ed4ea386f18c3bd93d986  demo1.html' | sha256sum -c -
+          echo '62694294bd254cd3873df17e77e5b246c2f29aa3f923541d39bbdcb73e205708  demo2.html' | sha256sum -c -
