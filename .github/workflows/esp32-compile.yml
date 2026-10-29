@@ -23,6 +23,12 @@ jobs:
         run: |
           set -o pipefail
           pio run --project-dir firmware/hardware-test 2>&1 | tee -a "$RUNNER_TEMP/esp32-build.log"
+      - name: Compile integrated firmware candidate (invalid fixture configuration)
+        shell: bash
+        run: |
+          set -o pipefail
+          cp firmware/production/src/config.example.h firmware/production/src/config.local.h
+          pio run --project-dir firmware/production 2>&1 | tee -a "$RUNNER_TEMP/esp32-build.log"
       - name: Report compile failure
         if: failure()
         shell: bash

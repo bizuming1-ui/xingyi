@@ -7,3 +7,6 @@ dist/
 # PlatformIO generated files
 .pio/
 .venv/
+
+# Private local device configuration
+firmware/production/src/config.local.h
