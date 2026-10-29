@@ -1,6 +1,11 @@
 name: Isolated public test pages
 on:
   workflow_dispatch:
+  push:
+    branches: [arena/2de2baa1-xingyi]
+    paths:
+      - .github/workflows/isolated-site-probe.yml
+      - tests/e2e/device-vault.mjs
 permissions:
   contents: read
 jobs:
