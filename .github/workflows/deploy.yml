@@ -20,13 +20,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      - run: npm test
       - run: |
           test -n "$VITE_SUPABASE_URL" && test -n "$VITE_SUPABASE_ANON_KEY" || { echo "Configure repository variables VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY"; exit 1; }
           npm run build
         env:
           BASE_PATH: /${{ github.event.repository.name }}/
-          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL }}
-          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
+          VITE_SUPABASE_URL: ${{ vars.VITE_SUPABASE_URL || 'https://cdaplcswcdjfbkdbabji.supabase.co' }}
+          VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY || 'sb_publishable_-YtgoTHY0IPYXiVb0L-oSA_hN4xnlZ7' }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

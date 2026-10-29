@@ -19,7 +19,7 @@ on conflict (id) do update set shared_user_id=excluded.shared_user_id,
 
 管理员连续输错 5 次后，所有操作人员的管理员操作会锁定 15 分钟；普通数量提交不受影响。共享账号不区分个人，确认记录不含个人身份；需要个人审计时应改为独立账号和权限模型。密码有单引号时需按 SQL 规则转义。数据库项目创建时的初始数据库密码曾出现在工具执行记录中，请在 Supabase 项目设置中重置数据库密码；网页不需要数据库密码。
 
-3. GitHub 仓库 Settings → Pages → Build and deployment 选择 **GitHub Actions**。仓库 Actions Variables 需要 `VITE_SUPABASE_URL` 和 `VITE_SUPABASE_ANON_KEY`，分别为项目 URL 和 **publishable/anon** 公钥。禁止使用 service_role 或 secret key。代码合并到 main 后工作流构建并部署，访问 `https://bizuming1-ui.github.io/xingyi/`（成功部署前该地址不能使用）。如果 Pages 未启用或 Actions 失败，检查仓库 Pages 设置和工作流日志。
+3. GitHub 仓库 Settings → Pages → Build and deployment 选择 **GitHub Actions**。工作流默认连接本项目；可通过仓库 Actions Variables `VITE_SUPABASE_URL` 和 `VITE_SUPABASE_ANON_KEY` 覆盖项目 URL 和 **publishable/anon** 公钥。默认值是可公开的客户端配置，权限仍由数据库 RLS 控制。禁止使用 service_role 或 secret key。代码合并到 main 后工作流构建并部署，访问 `https://bizuming1-ui.github.io/xingyi/`（成功部署前该地址不能使用）。如果 Pages 未启用或 Actions 失败，检查仓库 Pages 设置和工作流日志。
 4. 在生产环境使用前，使用两台真实设备核对扫码、登录、并发提交、自动同步、封顶、断网重试、管理员权限和归档。
 
 ## 本地运行
@@ -40,6 +40,6 @@ npm run build
 
 ## 手机扫码及单屏操作
 
-二维码指向当前网页的生产单列表，不包含账号或密码。手机需要能访问二维码里的 HTTPS 地址，扫码后使用同一个共享账号登录；安卓 Chrome 和 iPhone Safari 使用相同功能。电脑和手机应打开同一个已经部署的网页地址：Arena 临时预览、localhost 及局域网地址不保证能从其他设备访问，GitHub Pages 未部署前二维码不等于永久公网入口。界面不改变原有权限规则：管理员操作仍需管理员密码。
+二维码指向正式网站的生产单列表，不包含账号或密码。Arena 预览中生成的二维码指向 GitHub Pages 正式网址，而非无法直接通过手机访问的 Arena 预览地址；必须先完成正式部署。其他部署可通过 `VITE_PUBLIC_APP_URL` 指定公开网址。手机需要能访问二维码里的 HTTPS 地址，扫码后使用同一个共享账号登录；安卓 Chrome 和 iPhone Safari 使用相同功能。电脑和手机应打开同一个已经部署的网页地址：Arena 临时预览、localhost 及局域网地址不保证能从其他设备访问，GitHub Pages 未部署前二维码不等于永久公网入口。界面不改变原有权限规则：管理员操作仍需管理员密码。
 
 正常使用时各页面适配屏幕，不依靠页面滚动；列表和历史记录使用上一页、下一页。手机输入时若屏幕键盘遮挡内容，浏览器可临时滚动。极小屏幕、浏览器大字号及系统辅助功能可能需要调整缩放或横竖屏，实际设备兼容性仍需使用真实安卓和 iPhone 测试。
