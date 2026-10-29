@@ -30,4 +30,5 @@ try {
  await runSuite(5174,false,'pr1-regression.mjs');
  await runSuite(5175,true,'device-preview.mjs');
  await runSuite(5176,true,'device-confirm-preview.mjs',true);
+ await runSuite(5177,false,'device-download.mjs');
 } finally {rmSync(temp,{recursive:true,force:true});}
