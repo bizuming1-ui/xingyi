@@ -23,5 +23,9 @@ jobs:
         shell: bash
         run: |
           if [ -f "$RUNNER_TEMP/esp32-build.log" ]; then
-            while IFS= read -r line; do echo "::error::$line"; done < <(tail -n 30 "$RUNNER_TEMP/esp32-build.log")
+            message=$(tail -n 80 "$RUNNER_TEMP/esp32-build.log")
+            message="${message//'%'/'%25'}"
+            message="${message//$'\n'/'%0A'}"
+            message="${message//$'\r'/'%0D'}"
+            printf '::error::%s\n' "$message"
           fi
