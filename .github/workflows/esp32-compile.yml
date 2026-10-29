@@ -1,0 +1,16 @@
+name: ESP32-S3 compile smoke test
+on:
+  pull_request:
+    paths: ['firmware/**', 'tests/esp32_compile/**', '.github/workflows/esp32-compile.yml']
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install 'platformio==6.1.18'
+      - run: pio run --project-dir tests/esp32_compile

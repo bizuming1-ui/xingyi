@@ -18,3 +18,5 @@
 `DurableCounter.h` 定义了绑定版本、计数累计值和已确认值；存储层使用两个独立快照、校验和及递增版本。重传时携带累计值的设计可以支持服务端幂等处理，但服务端协议尚未实现。存在未同步计数时组件拒绝改绑；写入或读取校验失败时停止接受计数，不能静默清零。`PreferencesCounterStorage.h` 是 Arduino Preferences/NVS 适配器，目前仅用主机模拟接口测试过，**尚未使用 PlatformIO 实际编译、也未在开发板上验证**。
 
 测试命令：`./tests/run-firmware-tests.sh`。此测试覆盖去抖、长按、计数重启恢复、重复确认、错误绑定、模拟存储故障和模拟 Preferences 接口；不证明断电原子性、闪存寿命、一天离线容量、网络交互或硬件兼容性。10 次/秒高频写入可能明显加快闪存磨损，完整方案必须经实际断电及耐久测试，必要时需要优化写入策略或增加硬件。
+
+`tests/esp32_compile` 是专门的 PlatformIO **仅编译检查**，使用 `esp32-s3-devkitc-1`、16 MB Flash 和 QIO/OPI 内存配置编译当前组件，不能当作功能完整的固件烧录。该检查由 PR 中独立的 GitHub Actions 执行；本地如果有 PlatformIO，也可执行 `pio run --project-dir tests/esp32_compile`。编译成功只验证接口和工具链兼容，不能替代实板测试。
