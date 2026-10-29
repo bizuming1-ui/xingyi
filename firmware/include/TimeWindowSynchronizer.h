@@ -16,6 +16,9 @@ class TimeWindowSynchronizer {
   bool usesWindow(const TrustedTimeWindow& window) const {return &window_==&window;}
   TimeBootstrapExchange::Stage lastStage() const {return stage_;}
   int lastDetail() const {return detail_;}
+  uint32_t lastHandshakeStartMs() const {return bootstrap_.lastHandshakeStartMs();}
+  uint32_t lastTxBytes() const {return bootstrap_.lastTxBytes();}
+  uint32_t lastRxBytes() const {return bootstrap_.lastRxBytes();}
   TimeBootstrapExchange::Result refresh(const char* host,const char* key,const char* ca,
                                        const char* deviceId,const char* secret,uint32_t timeoutMs) {
     stage_=TimeBootstrapExchange::Stage::Clock;detail_=0;window_.invalidate();uint64_t before=0,after=0,seconds=0;

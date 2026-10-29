@@ -27,6 +27,9 @@ class TimeBootstrapExchange {
                      TlsHandshake=5, Send=6, Receive=7, Proof=8, Clock=9, Complete=10 };
   Stage lastStage() const {return stage_;}
   int lastDetail() const {return detail_;}
+  uint32_t lastHandshakeStartMs() const {return handshakeStartMs_;}
+  uint32_t lastTxBytes() const {return txBytes_;}
+  uint32_t lastRxBytes() const {return rxBytes_;}
   TimeBootstrapExchange(ConnectionClock& clock,NetworkYield& scheduler,NonblockingTcp& tcp,
                         ResolvedTcpConnect& resolved,TimeProof& proof)
     :clock_(clock),scheduler_(scheduler),tcp_(tcp),resolved_(resolved),proof_(proof){}
@@ -34,7 +37,7 @@ class TimeBootstrapExchange {
   TimeBootstrapExchange& operator=(const TimeBootstrapExchange&)=delete;
   Result fetch(const char* host,const char* key,const char* ca,const char* deviceId,const char* secret,
                uint32_t timeoutMs,uint64_t& seconds) {
-    stage_=Stage::Validate;detail_=0;
+    stage_=Stage::Validate;detail_=0;handshakeStartMs_=txBytes_=rxBytes_=0;
     if(!timeoutMs || timeoutMs>TimeProof::MAX_ROUND_TRIP_MS || !validKey(key) || !ca ||
        !resolved_.usesTransport(tcp_) || resolved_.state()!=ResolvedTcpConnect::State::Idle ||
        tcp_.state()!=NonblockingTcp::State::Idle)return Result::Unavailable;
@@ -56,7 +59,7 @@ class TimeBootstrapExchange {
     Context ctx;stage_=Stage::TlsConfig;
     if(!setup(ctx,resolved_.hostname(),ca))return expired(start,timeoutMs)?Result::Timeout:Result::Unavailable;
     if(expired(start,timeoutMs))return Result::Timeout;
-    stage_=Stage::TlsHandshake;
+    stage_=Stage::TlsHandshake;handshakeStartMs_=static_cast<uint32_t>(clock_.nowMillis()-start);
     for(;;) {
       const int rc=mbedtls_ssl_handshake(&ctx.ssl);
       if(expired(start,timeoutMs))return Result::Timeout;
@@ -103,6 +106,7 @@ class TimeBootstrapExchange {
   };
   ConnectionClock& clock_;NetworkYield& scheduler_;NonblockingTcp& tcp_;ResolvedTcpConnect& resolved_;TimeProof& proof_;
   Stage stage_=Stage::Idle;int detail_=0;
+  uint32_t handshakeStartMs_=0,txBytes_=0,rxBytes_=0;
   bool expired(uint32_t start,uint32_t limit){return static_cast<uint32_t>(clock_.nowMillis()-start)>=limit;}
   static int verifyTimeOnly(void* p,mbedtls_x509_crt* cert,int depth,uint32_t* flags) {
     if(!p || !cert || !flags || depth<0)return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
@@ -112,14 +116,16 @@ class TimeBootstrapExchange {
     return 0;
   }
   static int sendCallback(void* p,const unsigned char* data,size_t n){
-    auto r=static_cast<NonblockingTcp*>(p)->write(data,n>16384?16384:n);
-    if(r.status==NonblockingTcp::IoStatus::Progress)return static_cast<int>(r.count);
+    auto* self=static_cast<TimeBootstrapExchange*>(p);
+    auto r=self->tcp_.write(data,n>16384?16384:n);
+    if(r.status==NonblockingTcp::IoStatus::Progress){self->txBytes_+=static_cast<uint32_t>(r.count);return static_cast<int>(r.count);}
     if(r.status==NonblockingTcp::IoStatus::WouldBlock)return MBEDTLS_ERR_SSL_WANT_WRITE;
     return MBEDTLS_ERR_NET_SEND_FAILED;
   }
   static int recvCallback(void* p,unsigned char* data,size_t n){
-    auto r=static_cast<NonblockingTcp*>(p)->read(data,n>16384?16384:n);
-    if(r.status==NonblockingTcp::IoStatus::Progress)return static_cast<int>(r.count);
+    auto* self=static_cast<TimeBootstrapExchange*>(p);
+    auto r=self->tcp_.read(data,n>16384?16384:n);
+    if(r.status==NonblockingTcp::IoStatus::Progress){self->rxBytes_+=static_cast<uint32_t>(r.count);return static_cast<int>(r.count);}
     if(r.status==NonblockingTcp::IoStatus::WouldBlock)return MBEDTLS_ERR_SSL_WANT_READ;
     if(r.status==NonblockingTcp::IoStatus::Closed)return 0;
     return MBEDTLS_ERR_NET_RECV_FAILED;
@@ -136,7 +142,7 @@ class TimeBootstrapExchange {
     mbedtls_ssl_conf_min_version(&c.config,MBEDTLS_SSL_MAJOR_VERSION_3,MBEDTLS_SSL_MINOR_VERSION_3);
     mbedtls_ssl_conf_ca_chain(&c.config,&c.ca,nullptr);mbedtls_ssl_conf_rng(&c.config,mbedtls_ctr_drbg_random,&c.rng);
     if(mbedtls_ssl_setup(&c.ssl,&c.config)!=0 || mbedtls_ssl_set_hostname(&c.ssl,host)!=0)return false;
-    mbedtls_ssl_set_bio(&c.ssl,&tcp_,&sendCallback,&recvCallback,nullptr);return true;
+    mbedtls_ssl_set_bio(&c.ssl,this,&sendCallback,&recvCallback,nullptr);return true;
   }
   Result writeAll(Context& c,const char* data,size_t n,uint32_t start,uint32_t timeoutMs){
     size_t sent=0;

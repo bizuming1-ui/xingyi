@@ -58,6 +58,7 @@ int main(int argc,char** argv){
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::Ok);
  assert(seconds>=1704067200ULL && seconds<=4102444800ULL && tcp.state()==NonblockingTcp::State::Idle && !proof.nonce());
  assert(bootstrap.lastStage()==TimeBootstrapExchange::Stage::Complete && bootstrap.lastDetail()==0);
+ assert(bootstrap.lastTxBytes()>0 && bootstrap.lastRxBytes()>0 && bootstrap.lastHandshakeStartMs()<3000);
  TrustedTimeWindow window(clock,10000,1000);TimeWindowSynchronizer sync(clock,window,bootstrap);
  assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000)==R::Ok);
  TrustedTimeWindow::Bounds bounds{};assert(window.bounds(bounds));
@@ -78,5 +79,13 @@ int main(int argc,char** argv){
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,200,seconds)==R::Timeout && seconds==42);
  assert(bootstrap.lastStage()==TimeBootstrapExchange::Stage::Receive);
  assert(tcp.state()==NonblockingTcp::State::Idle && !proof.nonce());
+ // Same delayed response: 3s total rejects, 4.5s accepts while still keeping
+ // the authenticated proof's 5s upper bound and the validated time window.
+ entropy.pattern=0x12;
+ assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::Timeout);
+ assert(bootstrap.lastStage()==TimeBootstrapExchange::Stage::Receive);
+ assert(bootstrap.lastTxBytes()>0 && bootstrap.lastRxBytes()>0);
+ assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,4500)==R::Ok);
+ assert(window.bounds(bounds) && sync.lastStage()==TimeBootstrapExchange::Stage::Complete);
  std::cout<<"time-only bootstrap: date exception, CA/host checks, proof and timeout passed\n";
 }

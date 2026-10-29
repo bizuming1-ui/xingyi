@@ -19,6 +19,9 @@ class AuthenticatedNetworkTime final : public NetworkTimeService {
   int lastStage() const {return static_cast<int>(sync_.lastStage());}
   int lastDetail() const {return sync_.lastDetail();}
   int lastResult() const {return static_cast<int>(lastResult_);}
+  uint32_t lastHandshakeStartMs() const {return sync_.lastHandshakeStartMs();}
+  uint32_t lastTxBytes() const {return sync_.lastTxBytes();}
+  uint32_t lastRxBytes() const {return sync_.lastRxBytes();}
   void invalidate() override {window_.invalidate();}
  private:
   TrustedTimeWindow& window_;TimeWindowSynchronizer& sync_;const char *host_,*key_,*ca_,*deviceId_,*secret_;uint32_t timeout_;

@@ -26,6 +26,9 @@
 namespace {
 constexpr int BUTTON_PIN=4;
 constexpr uint32_t NETWORK_TIMEOUT_MS=3000;
+// Only for initial authenticated time; remains below the 5s proof limit.
+constexpr uint32_t TIME_BOOTSTRAP_TIMEOUT_MS=4500;
+static_assert(TIME_BOOTSTRAP_TIMEOUT_MS < TimeProof::MAX_ROUND_TRIP_MS,"proof timeout must remain bounded");
 constexpr uint32_t NETWORK_STACK_BYTES=24576;
 RuntimeConfig config{WIFI_SSID,WIFI_PASSWORD,SUPABASE_HOST,SUPABASE_PUBLISHABLE_KEY,
  DEVICE_ID,DEVICE_SECRET,SUPABASE_CA_PEM,TIME_LIFETIME_MS,CLOCK_DRIFT_PPM};
@@ -46,10 +49,11 @@ AuthenticatedNetworkTime* networkTime=nullptr;
 std::atomic<bool> stopNetwork{false};
 std::atomic<bool> radioOnline{false},timeTrusted{false};
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
+std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0};
 bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
-uint32_t lastStatus=0,lastDiagnostic=0;
+uint32_t lastStatus=0,lastDiagnostic=0,lastTlsIo=0;
 
 // Console output is best-effort and never waits for an attached terminal. No
 // secret, SSID, device ID, production-order UUID or request body is printed.
@@ -71,6 +75,9 @@ void networkTask(void*) {
     timeStage.store(networkTime->lastStage(),std::memory_order_relaxed);
     timeResult.store(networkTime->lastResult(),std::memory_order_relaxed);
     timeDetail.store(networkTime->lastDetail(),std::memory_order_relaxed);
+    timeStart.store(networkTime->lastHandshakeStartMs(),std::memory_order_relaxed);
+    timeTx.store(networkTime->lastTxBytes(),std::memory_order_relaxed);
+    timeRx.store(networkTime->lastRxBytes(),std::memory_order_relaxed);
     vTaskDelay(1);
   }
   vTaskDelete(nullptr);
@@ -113,7 +120,7 @@ void setup() {
   static SyncNetworkWorker worker(mailbox,exchange,config.secret);
   static TimeProof proof(networkEntropy);static TimeBootstrapExchange bootstrap(clock,scheduler,tcp,resolved,proof);
   static TimeWindowSynchronizer sync(monotonic,window,bootstrap);
-  static AuthenticatedNetworkTime time(window,sync,config.host,config.key,config.ca,config.deviceId,config.secret,NETWORK_TIMEOUT_MS);
+  static AuthenticatedNetworkTime time(window,sync,config.host,config.key,config.ca,config.deviceId,config.secret,TIME_BOOTSTRAP_TIMEOUT_MS);
   static NetworkTaskCoordinator coordinator(clock,wifi,time,worker);
   controller=&countController;input=&button;network=&coordinator;networkWifi=&wifi;networkTime=&time;
   if(controller->faulted()) {startupFault="FAULT: initial state invalid";status(startupFault);return;}
@@ -150,6 +157,11 @@ void loop() {
     lastDiagnostic=now;char diag[64];
     snprintf(diag,sizeof(diag),"TIME_DIAG stage=%d result=%d code=%d",timeStage.load(),timeResult.load(),timeDetail.load());
     status(diag);
+  }
+  if(radioOnline.load() && !timeTrusted.load() && now-lastTlsIo>=5000 && now-lastStatus>=3200 && now-lastDiagnostic>=1000) {
+    lastTlsIo=now;char info[64];
+    snprintf(info,sizeof(info),"TLS_IO start=%lu tx=%lu rx=%lu",static_cast<unsigned long>(timeStart.load()),static_cast<unsigned long>(timeTx.load()),static_cast<unsigned long>(timeRx.load()));
+    status(info);
   }
   delay(1);
 }

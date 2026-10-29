@@ -240,6 +240,8 @@ with tempfile.TemporaryDirectory() as tmp:
                     if nonce.startswith('10'):
                         time.sleep(.5)
                         continue
+                    if nonce.startswith('12'):
+                        time.sleep(3.3)
                     epoch=str(int(time.time()))
                     message=('xingyi-time-v1|'+payload['p_device']+'|'+nonce+'|'+epoch).encode()
                     tag=hmac.new(key,message,hashlib.sha256).hexdigest()
@@ -252,7 +254,7 @@ with tempfile.TemporaryDirectory() as tmp:
     thread.start()
     try:
         subprocess.run([str(p / 'test-bootstrap'),str(port),str(p / 'ca.crt'),str(p / 'wrong.crt')],check=True,timeout=30)
-        assert len(requests)==6, f'unexpected time-only requests: {len(requests)}'
+        assert len(requests)==8, f'unexpected time-only requests: {len(requests)}'
     finally:
         stop.set()
         listener.close()
