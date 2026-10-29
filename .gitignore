@@ -6,3 +6,4 @@ dist/
 
 # PlatformIO generated files
 .pio/
+.venv/
