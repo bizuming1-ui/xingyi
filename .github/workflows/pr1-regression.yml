@@ -15,5 +15,6 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm test
+      - run: ./scripts/build-isolated-demo.sh && ./scripts/build-device-demo.sh && git diff --exit-code -- public-demo/index.html public-device/index.html
       - run: npm ci --prefix tests/e2e
       - run: npm test --prefix tests/e2e

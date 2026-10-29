@@ -13,3 +13,5 @@ firmware/production/src/config.local.h
 
 # Isolated demo build staging
 .demo-output/
+
+.device-demo-output/

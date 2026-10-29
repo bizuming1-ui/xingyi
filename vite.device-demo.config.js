@@ -1,0 +1,5 @@
+import {defineConfig} from 'vite';
+import {viteSingleFile} from 'vite-plugin-singlefile';
+import {resolve} from 'node:path';
+// Public standalone download page, separate from the production deployment.
+export default defineConfig({base:'/functions/v1/demo2/',plugins:[viteSingleFile()],build:{outDir:'.device-demo-output',emptyOutDir:true,rollupOptions:{input:resolve('device/index.html')}}});
