@@ -19,6 +19,7 @@
 #include "../../../firmware/include/ResolvedTcpConnect.h"
 #include "../../../firmware/include/MbedTlsSession.h"
 #include "../../../firmware/include/VerifiedConnect.h"
+#include "../../../firmware/include/MbedTlsChannel.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -56,6 +57,11 @@ MbedTlsSession tlsSession(rawTcp);
 class FixtureClock : public ConnectionClock {public: uint32_t nowMillis() override {return millis();}};
 FixtureClock fixtureClock;
 VerifiedConnect verifiedConnect(fixtureClock,rawTcp,resolvedTcp,tlsSession);
+class FixtureTrustedTime : public TrustedTime {public: bool trusted() override {return false;}};
+class FixtureNetworkYield : public NetworkYield {public: void yield() override {delay(1);}};
+FixtureTrustedTime fixtureTrustedTime;FixtureNetworkYield fixtureNetworkYield;
+MbedTlsChannel tlsChannel(fixtureClock,fixtureNetworkYield,fixtureTrustedTime,verifiedConnect,tlsSession,"fixture CA");
+HttpRpcExchange actualFixtureHttp(tlsChannel,"project123.supabase.co","sb_publishable_test",1000);
 EspWifiStation wifiStation;
 WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
 EspWifiEntropy hardwareEntropy;
@@ -92,6 +98,7 @@ void loop() {
     (void)httpResponse.feed(sample,sizeof(sample)-1);
     (void)httpResponse.finish();
     (void)fixtureHttp.post("device_status","{}",2,responseBuffer,sizeof(responseBuffer));
+    (void)actualFixtureHttp.post("device_status","{}",2,responseBuffer,sizeof(responseBuffer));
     controller->step(millis());
     networkWorker.step();
     (void)counter.bind("00000000-0000-4000-8000-000000000001", 1,

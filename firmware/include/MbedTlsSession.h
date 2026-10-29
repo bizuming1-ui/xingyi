@@ -31,9 +31,6 @@ class MbedTlsSession {
   // trustworthy wall clock. A plausible clock alone does not prove this.
   bool begin(const char* originalHost,const char* trustedCaPem,bool timeTrusted) {
     if(state_!=State::Idle || tcp_.state()!=NonblockingTcp::State::Connected)return false;
-#if !defined(MBEDTLS_HAVE_TIME_DATE)
-    (void)originalHost;(void)trustedCaPem;(void)timeTrusted;return fail();
-#else
     const time_t now=time(nullptr);
     if(!timeTrusted || now<1704067200 || !validHost(originalHost) || !trustedCaPem)return fail();
     size_t pemLen=0;while(pemLen<16384 && trustedCaPem[pemLen])++pemLen;
@@ -46,19 +43,21 @@ class MbedTlsSession {
     if(mbedtls_ctr_drbg_seed(&rng_,mbedtls_entropy_func,&entropy_,personalization,sizeof(personalization)-1)!=0 ||
        mbedtls_ssl_config_defaults(&config_,MBEDTLS_SSL_IS_CLIENT,MBEDTLS_SSL_TRANSPORT_STREAM,MBEDTLS_SSL_PRESET_DEFAULT)!=0)return fail();
     mbedtls_ssl_conf_authmode(&config_,MBEDTLS_SSL_VERIFY_REQUIRED);
+    // Some ESP SDKs compile mbedTLS without built-in date checks. The
+    // verification callback checks every certificate in the verified chain.
+    sawLeaf_=false;mbedtls_ssl_conf_verify(&config_,&verifyDate,this);
     mbedtls_ssl_conf_min_version(&config_,MBEDTLS_SSL_MAJOR_VERSION_3,MBEDTLS_SSL_MINOR_VERSION_3);
     mbedtls_ssl_conf_ca_chain(&config_,&ca_,nullptr);
     mbedtls_ssl_conf_rng(&config_,mbedtls_ctr_drbg_random,&rng_);
     if(mbedtls_ssl_setup(&ssl_,&config_)!=0 || mbedtls_ssl_set_hostname(&ssl_,originalHost)!=0)return fail();
     mbedtls_ssl_set_bio(&ssl_,this,&sendCallback,&recvCallback,nullptr);
     state_=State::Handshaking;return true;
-#endif
   }
   State handshake() {
     if(state_!=State::Handshaking)return state_;
     const int rc=mbedtls_ssl_handshake(&ssl_);
     if(rc==0) {
-      if(mbedtls_ssl_get_verify_result(&ssl_)!=0){fail();return state_;}
+      if(!sawLeaf_ || mbedtls_ssl_get_verify_result(&ssl_)!=0){fail();return state_;}
       state_=State::Verified;
     } else if(rc!=MBEDTLS_ERR_SSL_WANT_READ && rc!=MBEDTLS_ERR_SSL_WANT_WRITE)fail();
     return state_;
@@ -82,7 +81,7 @@ class MbedTlsSession {
     tcp_.close();state_=State::Idle;
   }
  private:
-  NonblockingTcp& tcp_;State state_=State::Idle;
+  NonblockingTcp& tcp_;State state_=State::Idle;bool sawLeaf_=false;
   mbedtls_ssl_context ssl_;mbedtls_ssl_config config_;mbedtls_x509_crt ca_;
   mbedtls_entropy_context entropy_;mbedtls_ctr_drbg_context rng_;
   bool fail(){tcp_.close();state_=State::Failed;return false;}
@@ -104,6 +103,25 @@ class MbedTlsSession {
     if(r.status==NonblockingTcp::IoStatus::WouldBlock)return MBEDTLS_ERR_SSL_WANT_READ;
     if(r.status==NonblockingTcp::IoStatus::Closed)return 0;
     return MBEDTLS_ERR_NET_RECV_FAILED;
+  }
+  // Called by mbedTLS for each certificate including the trusted root. Never
+  // clear library verification flags. An unavailable/unreasonable clock fails
+  // closed. UTC comparison uses certificate fields already parsed by mbedTLS.
+  static int verifyDate(void* context,mbedtls_x509_crt* cert,int depth,uint32_t* flags) {
+    auto* self=static_cast<MbedTlsSession*>(context);
+    if(!cert || !flags || depth<0)return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
+    if(depth==0)self->sawLeaf_=true;
+    const time_t now=time(nullptr);struct tm utc{};
+    if(now<1704067200 || !gmtime_r(&now,&utc)) {*flags |= MBEDTLS_X509_BADCERT_NOT_TRUSTED;return 0;}
+    const int current[]={utc.tm_year+1900,utc.tm_mon+1,utc.tm_mday,utc.tm_hour,utc.tm_min,utc.tm_sec};
+    if(compare(cert->valid_from,current)>0)*flags |= MBEDTLS_X509_BADCERT_FUTURE;
+    if(compare(cert->valid_to,current)<0)*flags |= MBEDTLS_X509_BADCERT_EXPIRED;
+    return 0;
+  }
+  static int compare(const mbedtls_x509_time& t,const int current[6]) {
+    const int values[]={t.year,t.mon,t.day,t.hour,t.min,t.sec};
+    for(unsigned i=0;i<6;++i){if(values[i]<current[i])return -1;if(values[i]>current[i])return 1;}
+    return 0;
   }
   static bool validHost(const char* host) {
     if(!host)return false;

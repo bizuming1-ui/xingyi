@@ -23,7 +23,7 @@ int main(int argc,char** argv){
  assert(argc==4 || argc==5);const int port=std::stoi(argv[1]);const auto ca=file(argv[2]),wrongCa=file(argv[3]);
  EspTcpOps ops;NonblockingTcp tcp(ops);MbedTlsSession tls(tcp);
  using S=MbedTlsSession::Status;
- if(argc==5){connect(tcp,port);assert(tls.begin("project123.supabase.co",ca.c_str(),true));assert(!handshake(tls));std::cout<<"expired certificate rejected\n";return 0;}
+ if(argc==5){connect(tcp,port);assert(tls.begin("project123.supabase.co",ca.c_str(),true));assert(!handshake(tls));std::cout<<"invalid certificate date rejected\n";return 0;}
  uint8_t byte=0;
  connect(tcp,port);assert(!tls.begin("project123.supabase.co",ca.c_str(),false));
  assert(tls.state()==MbedTlsSession::State::Failed && tls.write(&byte,1).status==S::Error);tls.reset();
