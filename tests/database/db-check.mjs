@@ -15,6 +15,7 @@ try {
  create publication supabase_realtime;`);
  await db.exec(await readFile(new URL('../../supabase/schema.sql',import.meta.url),'utf8'));
  await db.exec(await readFile(new URL('../../supabase/migrations/202610290001_device_ingest.sql',import.meta.url),'utf8'));
+ await db.exec(await readFile(new URL('../../supabase/migrations/202610290002_device_confirmation.sql',import.meta.url),'utf8'));
  await db.query('insert into auth.users(id) values ($1),($2)',[user,other]);
  await db.query("insert into public.app_settings(id,shared_user_id,admin_password_hash) values(true,$1,extensions.crypt('fixture-admin-pass',extensions.gen_salt('bf')))",[user]);
  await db.query("insert into public.orders(id,order_no,product,total,current_count) values($1,'first','item',100,95),($2,'second','item',100,0)",[first,second]);
@@ -25,6 +26,11 @@ try {
  await assert.rejects(()=>db.query('select * from public.device_order_drafts'),/permission denied/);
  await role('authenticated');
  assert.equal((await one('select public.device_create($1,$2) as result',['wrong','test'])).result,null);
+ const temporary=(await one('select public.device_create($1,$2) as result',['fixture-admin-pass','temporary'])).result;
+ assert.equal((await one('select public.device_revoke($1,$2) as ok',['fixture-admin-pass',temporary.id])).ok,true);
+ await role('anon');
+ await assert.rejects(()=>db.query('select public.device_status($1)',[temporary.secret]),/设备认证失败/);
+ await role('authenticated');
  const created=(await one('select public.device_create($1,$2) as result',['fixture-admin-pass','test'])).result;
  assert.match(created.secret,/^[0-9a-f]{64}$/);
  assert.equal((await one('select count(*) as n from public.device_list()')).n,1);
@@ -64,13 +70,76 @@ try {
  const manual=(await one('select public.submit_production($1,$2,$3) as result',[first,10,'c0000000-0000-4000-8000-000000000001'])).result;
  assert.equal(manual.applied,5); assert.equal(manual.current,100);
  assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[first])).count,20);
+ // Prepare a separate device batch and prove PR1 manual counting remains independent.
+ const addManual=(await one('select public.submit_production($1,$2,$3) as result',[second,95,'c0000000-0000-4000-8000-000000000002'])).result;
+ assert.equal(addManual.current,95);
+ await role('anon'); await ingest(binding2,e2,10);
+ await role('authenticated');
+ const req='d0000000-0000-4000-8000-000000000001';
+ const barrier=(await one('select public.device_confirmation_request($1,$2,$3) as id',[created.id,second,req])).id;
+ assert.equal((await one('select public.device_confirmation_request($1,$2,$3) as id',[created.id,second,req])).id,barrier);
+ await assert.rejects(()=>db.query('select public.device_confirmation_request($1,$2,$3)',[null,second,req]),/请求参数无效/);
+ await assert.rejects(()=>db.query('select public.device_confirmation_request($1,$2,$3)',[created.id,first,req]),/重复请求参数不一致/);
+ await assert.rejects(()=>db.query('select public.device_confirmation_commit($1)',[barrier]),/设备未冻结同步或续约已过期/);
+ await role('anon');
+ assert.equal((await one('select public.device_status($1) as result',[created.secret])).result.barrier_id,barrier);
+ await assert.rejects(()=>db.query('select public.device_confirmation_commit($1)',[barrier]),/permission denied/);
+ await assert.rejects(()=>db.query('select public.device_confirmation_freeze($1,$2,$3,$4,$5)',[created.secret,barrier,binding2,e2,9]),/设备计数尚未同步/);
+ const frozen=(await one('select public.device_confirmation_freeze($1,$2,$3,$4,$5) as result',[created.secret,barrier,binding2,e2,10])).result;
+ assert.equal(frozen.state,'ready'); assert.ok(frozen.lease_nonce);
+ const sameFreeze=(await one('select public.device_confirmation_freeze($1,$2,$3,$4,$5) as result',[created.secret,barrier,binding2,e2,10])).result;
+ assert.equal(sameFreeze.lease_until,frozen.lease_until); // Retries cannot silently extend the lease.
+ assert.equal((await ingest(binding2,e2,10)).accepted_total,10);
+ await assert.rejects(()=>ingest(binding2,e2,11),/设备确认冻结中/);
+ const renew=(await one('select public.device_confirmation_renew($1,$2,$3,$4,$5,$6) as result',[created.secret,barrier,binding2,e2,10,frozen.lease_nonce])).result;
+ assert.equal(renew.state,'ready'); assert.notEqual(renew.lease_nonce,frozen.lease_nonce);
+ await assert.rejects(()=>db.query('select public.device_confirmation_renew($1,$2,$3,$4,$5,$6)',[created.secret,barrier,binding2,e2,10,frozen.lease_nonce]),/续约令牌已使用/);
+ await role('authenticated');
+ assert.equal((await one('select public.device_confirmation_view($1) as result',[barrier])).result.state,'ready');
+ await assert.rejects(()=>db.query('select public.device_request_binding($1,$2)',[created.id,first]),/确认请求/);
+ const confirmed=(await one('select public.device_confirmation_commit($1) as result',[barrier])).result;
+ assert.deepEqual(confirmed,{requested:10,applied:5,current:100});
+ assert.deepEqual((await one('select public.device_confirmation_commit($1) as result',[barrier])).result,confirmed);
+ const history=(await one('select public.admin_history($1,$2) as result',['fixture-admin-pass',second])).result;
+ assert.equal(history.length,2); assert.ok(history.some(row=>row.requested===10 && row.applied===5 && row.resulting_count===100));
+ assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,0);
+ await assert.rejects(()=>db.query('select public.device_confirmation_cancel($1)',[barrier]),/不能取消/);
+ await role('anon');
+ assert.equal((await one('select public.device_confirmation_status($1,$2) as result',[created.secret,barrier])).result.state,'completed');
+ await ingest(binding2,e2,12); // New events after commit belong to the next batch.
+ await role('authenticated');
+ assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,2);
+ const expire=(await one('select public.device_confirmation_request($1,$2,$3) as id',[created.id,second,'d0000000-0000-4000-8000-000000000002'])).id;
+ await role('anon');
+ const lease=(await one('select public.device_confirmation_freeze($1,$2,$3,$4,$5) as result',[created.secret,expire,binding2,e2,12])).result;
+ await db.exec('reset role');
+ await db.query("update public.device_confirmation_barriers set lease_until=clock_timestamp()-interval '1 second' where id=$1",[expire]);
+ await role('anon');
+ assert.equal((await one('select public.device_confirmation_renew($1,$2,$3,$4,$5,$6) as result',[created.secret,expire,binding2,e2,12,lease.lease_nonce])).result.state,'expired');
+ assert.equal((await one('select public.device_confirmation_status($1,$2) as result',[created.secret,expire])).result.state,'expired');
+ assert.equal((await one('select public.device_confirmation_freeze($1,$2,$3,$4,$5) as result',[created.secret,expire,binding2,e2,12])).result.state,'expired');
+ await ingest(binding2,e2,13); // Expired freeze must not block later uploads.
+ await role('authenticated');
+ await assert.rejects(()=>db.query('select public.device_confirmation_commit($1)',[expire]),/续约已过期/);
+ assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,3);
+ assert.equal((await one('select public.device_confirmation_cancel($1) as ok',[expire])).ok,true);
+ assert.equal((await one('select public.device_confirmation_cancel($1) as ok',[expire])).ok,true);
+ // A request ID already used by PR1 must fail atomically: no draft or order loss.
+ const collision=(await one('select public.device_confirmation_request($1,$2,$3) as id',[created.id,second,'c0000000-0000-4000-8000-000000000002'])).id;
+ await role('anon');
+ await one('select public.device_confirmation_freeze($1,$2,$3,$4,$5) as result',[created.secret,collision,binding2,e2,13]);
+ await role('authenticated');
+ await assert.rejects(()=>db.query('select public.device_confirmation_commit($1)',[collision]),/duplicate key/);
+ assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,3);
+ assert.equal((await one('select current_count from public.orders where id=$1',[second])).current_count,100);
+ assert.equal((await one('select public.device_confirmation_cancel($1) as ok',[collision])).ok,true);
+
  await role('authenticated',other);
  assert.equal((await one('select count(*) as n from public.device_order_drafts')).n,0);
  await assert.rejects(()=>db.query('select public.device_list()'),/无访问权限/);
  await role('authenticated');
- assert.equal((await one('select public.device_revoke($1,$2) as ok',['fixture-admin-pass',created.id])).ok,true);
+ await assert.rejects(()=>db.query('select public.device_revoke($1,$2)',['fixture-admin-pass',created.id]),/不能直接撤销/);
  await role('anon');
- await assert.rejects(()=>db.query('select public.device_status($1)',[created.secret]),/设备认证失败/);
- await assert.rejects(()=>db.query('select public.device_ingest($1,$2,$3,$4)',[created.secret,binding1,e1,21]),/设备认证失败/);
- console.log('isolated database tests passed: permissions, idempotency, offline rebinding, revoke, PR1 manual cap');
+ assert.equal((await one('select public.device_status($1) as result',[created.secret])).result.device_id,created.id);
+ console.log('isolated database tests passed: permissions, idempotency, offline rebinding, freeze/lease, retry, expiry, revoke and PR1 manual cap');
 } finally {await db.close()}
