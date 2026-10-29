@@ -28,6 +28,19 @@ export class DeviceData {
     if(draft.data!==null && (!draft.data || draft.data.order_id!==orderId || !count(draft.data.count))) throw new Error('设备计数数据无效。');
     return {orderId,device,draftCount:draft.data===null?0:draft.data.count};
   }
+  async provision(adminPassword,label) {
+    if(typeof adminPassword!=='string' || !adminPassword || typeof label!=='string' || !label.trim() || label.trim().length>100) throw new Error('请输入管理员密码和设备名称。');
+    // A dropped response is uncertain: never retry automatically. Server stores
+    // only a hash and cannot show the generated secret again.
+    let result;
+    try {result=await this.db.rpc('device_create',{p_admin_password:adminPassword,p_label:label.trim()});}
+    catch {throw new Error('创建设备结果未知；不要重复创建，请先核对设备列表。');}
+    if(!result || result.error)throw new Error('创建设备结果未知；不要重复创建，请先核对设备列表。');
+    if(result.data===null)throw new Error('管理员密码错误或暂时锁定，未创建设备。');
+    const {id,secret}=result.data;
+    if(!uuid(id) || typeof secret!=='string' || !/^[0-9a-f]{64}$/.test(secret))throw new Error('创建设备回复无效；不要重复创建，请先核对设备列表。');
+    return {id,secret};
+  }
   async requestBinding(deviceId,orderId,confirmed) {
     if(confirmed!==true)throw new Error('请先确认设备要绑定的生产单。');
     if(!uuid(deviceId) || !uuid(orderId))throw new Error('设备或生产单无效。');

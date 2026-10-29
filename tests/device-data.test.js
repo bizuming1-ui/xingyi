@@ -56,3 +56,11 @@ test('a rejected read waits for the other read before failing',async()=>{
   const request=new DeviceData(db).load(order).catch(()=>{done=true;});
   await flush();assert.equal(done,false);wait.resolve({data:null,error:null});await request;assert.equal(done,true);
 });
+test('provisioning returns one-time credentials without retrying uncertain requests',async()=>{
+ const id=device,secret='a'.repeat(64);let calls=0;
+ const db={rpc:async(name,args)=>{calls++;assert.equal(name,'device_create');assert.deepEqual(args,{p_admin_password:'fixture',p_label:'测试'});return {data:{id,secret},error:null}}};
+ const data=new DeviceData(db);assert.deepEqual(await data.provision('fixture',' 测试 '),{id,secret});assert.equal(calls,1);
+ db.rpc=async()=>{calls++;throw Error('response lost')};await assert.rejects(()=>data.provision('fixture','测试'),/结果未知/);assert.equal(calls,2);
+ db.rpc=async()=>({data:null,error:null});await assert.rejects(()=>data.provision('fixture','测试'),/未创建设备/);
+ db.rpc=async()=>({data:{id,secret:'not-a-secret'},error:null});await assert.rejects(()=>data.provision('fixture','测试'),/回复无效/);
+});
