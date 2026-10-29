@@ -9,6 +9,7 @@
 #include "../../../firmware/include/RpcWorker.h"
 #include "../../../firmware/include/FreeRtosSyncMailbox.h"
 #include "../../../firmware/include/HttpResponseDecoder.h"
+#include "../../../firmware/include/HttpRpcExchange.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -21,6 +22,16 @@ class FixtureExchange : public RpcExchange {
  public:
   Response post(const char*,const char*,size_t,char*,size_t) override { return {}; }
 };
+class FixtureTls : public VerifiedTlsChannel {
+ public:
+  uint32_t nowMillis() override { return millis(); }
+  Connect connectVerified(const char*,uint16_t,uint32_t) override { return Connect::Error; }
+  int write(const char*,size_t,uint32_t) override { return -1; }
+  int read(char*,size_t,uint32_t) override { return -1; }
+  void close() override {}
+};
+FixtureTls fixtureTls;
+HttpRpcExchange fixtureHttp(fixtureTls,"project123.supabase.co","sb_publishable_test",1000);
 FixtureExchange fixtureExchange;
 FreeRtosSyncMailbox mailbox;
 SyncController* controller = nullptr;
@@ -44,6 +55,7 @@ void loop() {
     const char sample[]="HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
     (void)httpResponse.feed(sample,sizeof(sample)-1);
     (void)httpResponse.finish();
+    (void)fixtureHttp.post("device_status","{}",2,responseBuffer,sizeof(responseBuffer));
     controller->step(millis());
     networkWorker.step();
     (void)counter.bind("00000000-0000-4000-8000-000000000001", 1,

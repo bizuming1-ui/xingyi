@@ -1,0 +1,99 @@
+#pragma once
+#include "RpcWorker.h"
+#include "HttpResponseDecoder.h"
+#include <stdio.h>
+
+// Adapter contract, NOT a TLS implementation. Every operation must obey the
+// supplied remaining deadline. connectVerified must fail unless the configured
+// trust anchor AND the exact host name have been verified, including valid
+// certificate time; insecure or plaintext fallback is forbidden. Return -2 for
+// timeout, -1 for error, 0 for EOF, positive byte count for success.
+class VerifiedTlsChannel {
+ public:
+  enum class Connect { Ok, Error, Timeout };
+  virtual ~VerifiedTlsChannel()=default;
+  virtual uint32_t nowMillis()=0;
+  virtual Connect connectVerified(const char* host,uint16_t port,uint32_t timeoutMs)=0;
+  virtual int write(const char* data,size_t length,uint32_t timeoutMs)=0;
+  virtual int read(char* data,size_t capacity,uint32_t timeoutMs)=0;
+  virtual void close()=0;
+};
+
+// Fixed-origin, one-request-per-connection HTTP exchange. No redirect handling.
+// No connection is established until config and the endpoint have been checked.
+// Runtime must provide a real verified TLS channel and synchronized clock.
+class HttpRpcExchange final : public RpcExchange {
+ public:
+  HttpRpcExchange(VerifiedTlsChannel& channel,const char* host,const char* publishableKey,uint32_t timeoutMs)
+    : channel_(channel),host_(host),key_(publishableKey),timeoutMs_(timeoutMs) {}
+  Response post(const char* endpoint,const char* json,size_t jsonLength,char* response,size_t responseCapacity) override {
+    Response result{};
+    if(!validHost(host_) || !validKey(key_) || !validEndpoint(endpoint) || !json || jsonLength==0 || jsonLength>767 ||
+       !response || responseCapacity>RpcCodec::MAX_RESPONSE_BYTES || timeoutMs_==0 || timeoutMs_>30000) return result;
+    char headers[768]{};
+    const int n=snprintf(headers,sizeof(headers),
+      "POST /rest/v1/rpc/%s HTTP/1.1\r\nHost: %s\r\napikey: %s\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %lu\r\n\r\n",
+      endpoint,host_,key_,static_cast<unsigned long>(jsonLength));
+    if(n<0 || static_cast<size_t>(n)>=sizeof(headers)) return result;
+    const uint32_t start=channel_.nowMillis();
+    struct Closer { VerifiedTlsChannel& ch; explicit Closer(VerifiedTlsChannel& c):ch(c){} ~Closer(){ch.close();} } closer(channel_);
+    const auto connected=channel_.connectVerified(host_,443,timeoutMs_);
+    if(connected!=VerifiedTlsChannel::Connect::Ok) { result.status=connected==VerifiedTlsChannel::Connect::Timeout?Status::Timeout:Status::NetworkError; return result; }
+    if(!remaining(start)) { result.status=Status::Timeout; return result; }
+    int failure=writeAll(headers,static_cast<size_t>(n),start);
+    if(!failure) failure=writeAll(json,jsonLength,start);
+    if(failure) { result.status=failure==-2?Status::Timeout:Status::NetworkError; return result; }
+    HttpResponseDecoder parser(response,responseCapacity);
+    struct ReadBuffer { char data[256]{}; ~ReadBuffer(){RpcCodec::wipe(data,sizeof(data));} } block;
+    for (;;) {
+      const uint32_t left=remaining(start);
+      if(!left){result.status=Status::Timeout;return result;}
+      const int count=channel_.read(block.data,sizeof(block.data),left);
+      if(!remaining(start)){result.status=Status::Timeout;return result;}
+      if(count<=0 || static_cast<size_t>(count)>sizeof(block.data)) {
+        result.status=count==-2?Status::Timeout:Status::NetworkError; return result;
+      }
+      const auto parsed=parser.feed(block.data,static_cast<size_t>(count));
+      if(parsed==HttpResponseDecoder::Result::Complete) {
+        result.status=Status::Ok;result.httpStatus=parser.statusCode();result.length=parser.length();return result;
+      }
+      if(parsed==HttpResponseDecoder::Result::TooLarge){result.status=Status::ResponseTooLarge;return result;}
+      if(parsed==HttpResponseDecoder::Result::Invalid){result.status=Status::NetworkError;return result;}
+    }
+  }
+ private:
+  VerifiedTlsChannel& channel_; const char* host_;const char* key_;uint32_t timeoutMs_;
+  uint32_t remaining(uint32_t start) {const uint32_t elapsed=channel_.nowMillis()-start;return elapsed>=timeoutMs_?0:timeoutMs_-elapsed;}
+  int writeAll(const char* data,size_t length,uint32_t start) {
+    size_t sent=0;
+    while(sent<length) {
+      const uint32_t left=remaining(start);if(!left)return -2;
+      const int n=channel_.write(data+sent,length-sent,left);
+      if(!remaining(start))return -2;
+      if(n<=0 || static_cast<size_t>(n)>length-sent)return n==-2?-2:-1;
+      sent+=static_cast<size_t>(n);
+    }
+    return 0;
+  }
+  static bool validEndpoint(const char* endpoint) {
+    if(!endpoint)return false;
+    using K=SyncPlanner::Kind;
+    const K allowed[]={K::Poll,K::Upload,K::Freeze,K::BarrierStatus,K::Renew,K::Abort};
+    for(auto kind:allowed)if(strcmp(endpoint,RpcCodec::endpoint(kind))==0)return true;
+    return false;
+  }
+  static bool validHost(const char* s) {
+    if(!s)return false;
+    size_t n=0;while(n<80 && s[n])++n;
+    const char suffix[]=".supabase.co";const size_t suffixSize=sizeof(suffix)-1;
+    if(n<=suffixSize || n>=80 || n-suffixSize>63 || memcmp(s+n-suffixSize,suffix,suffixSize)!=0)return false;
+    // Exactly one lowercase project-ref label, no port, dots or header syntax.
+    for(size_t i=0;i<n-suffixSize;++i)if(!((s[i]>='a'&&s[i]<='z')||(s[i]>='0'&&s[i]<='9')))return false;
+    return true;
+  }
+  static bool validKey(const char* s) {
+    if(!s || strncmp(s,"sb_publishable_",15)!=0)return false;
+    size_t n=0;while(n<128 && s[n]) {const char c=s[n];if(!((c>='a'&&c<='z')||(c>='A'&&c<='Z')||(c>='0'&&c<='9')||c=='_'||c=='-'))return false;++n;}
+    return n>15 && n<128;
+  }
+};

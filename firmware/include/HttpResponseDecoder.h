@@ -16,6 +16,10 @@ class HttpResponseDecoder {
   HttpResponseDecoder(char* output,size_t capacity) : output_(output),capacity_(capacity) {
     if (!output_ && capacity_) state_=State::Invalid;
   }
+  ~HttpResponseDecoder() {
+    volatile char* p=headers_;
+    for(size_t i=0;i<sizeof(headers_);++i)p[i]=0;
+  }
   Result feed(const char* data,size_t size) {
     if (!data && size) { state_=State::Invalid; return result(); }
     for (size_t i=0;i<size;++i) {

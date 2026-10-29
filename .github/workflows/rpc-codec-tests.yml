@@ -1,7 +1,7 @@
 name: Device RPC codec tests
 on:
   pull_request:
-    paths: ['firmware/**', 'tests/rpc_codec.cpp', 'tests/rpc_worker.cpp', 'tests/sync_bridge.cpp', 'tests/free_rtos_mailbox.cpp', 'tests/http_response_decoder.cpp', 'tests/mocks/freertos/**', 'tests/run-rpc-tests.sh', '.github/workflows/rpc-codec-tests.yml']
+    paths: ['firmware/**', 'tests/rpc_codec.cpp', 'tests/rpc_worker.cpp', 'tests/sync_bridge.cpp', 'tests/free_rtos_mailbox.cpp', 'tests/http_response_decoder.cpp', 'tests/http_rpc_exchange.cpp', 'tests/mocks/freertos/**', 'tests/run-rpc-tests.sh', '.github/workflows/rpc-codec-tests.yml']
 permissions:
   contents: read
 jobs:
@@ -23,3 +23,7 @@ jobs:
         run: |
           g++ -std=c++11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer tests/http_response_decoder.cpp -o "$RUNNER_TEMP/http-decoder-test"
           "$RUNNER_TEMP/http-decoder-test"
+      - name: Check HTTP exchange with sanitizers
+        run: |
+          g++ -std=c++11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -I "$RUNNER_TEMP/ArduinoJson-6.21.5/src" tests/http_rpc_exchange.cpp -o "$RUNNER_TEMP/http-rpc-test"
+          "$RUNNER_TEMP/http-rpc-test"
