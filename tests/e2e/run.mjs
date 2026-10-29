@@ -32,5 +32,5 @@ try {
  await runSuite(5176,true,'device-confirm-preview.mjs',true);
  await runSuite(5277,false,'device-download.mjs');
  await runSuite(5278,true,'device-provision-preview.mjs');
- await runSuite(5279,true,'test-setup-preview.mjs',false,true);
+ await runSuite(5279,true,'first-setup-preview.mjs',false,true);
 } finally {rmSync(temp,{recursive:true,force:true});}
