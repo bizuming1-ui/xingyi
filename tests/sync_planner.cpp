@@ -12,6 +12,11 @@ struct Epochs : EpochSource {
   unsigned n=0;
   bool generate(char out[37]) override { const char* values[]={"10000000-0000-4000-8000-000000000001","10000000-0000-4000-8000-000000000002"}; if(n>=2)return false;memcpy(out,values[n++],37);return true; }
 };
+struct RetryEpochs : EpochSource {
+ unsigned calls=0;bool ready=false;bool retryable=true;
+ bool generate(char out[37]) override {++calls;if(!ready)return false;memcpy(out,"10000000-0000-4000-8000-000000000002",37);return true;}
+ bool failureMayRetry() const override{return retryable;}
+};
 using K=SyncPlanner::Kind; using B=SyncPlanner::BarrierState; using R=DurableCounter::Result;
 const char* order1="00000000-0000-4000-8000-000000000001";
 const char* order2="00000000-0000-4000-8000-000000000002";
@@ -90,5 +95,24 @@ int main(){
  assert(rollover.complete(step.ticket,status(order1,binding1,1),UINT32_MAX-50));
  assert(rollover.next(148).kind==K::None);
  assert(rollover.next(149).kind==K::Upload);
+ // Temporary entropy unavailability must not fault or move offline counts to
+ // the newly desired binding. Retry is bounded and old counts drain first.
+ Store store5;DurableCounter c5(store5);assert(c5.load()==R::Ok);
+ assert(c5.bind(order1,1,binding1,"10000000-0000-4000-8000-000000000001")==R::Ok);
+ RetryEpochs retryEpoch;SyncPlanner retry(c5,retryEpoch);step=retry.next(0);
+ assert(retry.complete(step.ticket,status(order2,binding2,2),0));
+ step=retry.next(200);assert(step.kind==K::Upload && strcmp(step.binding,binding1)==0);
+ assert(retry.complete(step.ticket,accepted(0),210));
+ assert(retry.next(400).kind==K::None && !retry.faulted() && retryEpoch.calls==1);
+ assert(retry.next(401).kind==K::None && retryEpoch.calls==1); // no busy loop
+ assert(retry.count(3)==R::Ok && strcmp(c5.state().bindingId,binding1)==0);
+ step=retry.next(600);assert(step.kind==K::Poll);assert(retry.complete(step.ticket,status(order2,binding2,2),610));
+ step=retry.next(800);assert(step.kind==K::Upload && step.total==3 && strcmp(step.binding,binding1)==0);
+ assert(retry.complete(step.ticket,accepted(3),810));retryEpoch.ready=true;
+ step=retry.next(1000);assert(step.kind==K::Upload && step.total==0 && strcmp(step.binding,binding2)==0);
+ // Explicitly non-retryable entropy failures still stop safely.
+ Store store6;DurableCounter c6(store6);assert(c6.load()==R::Ok);RetryEpochs fatal;fatal.retryable=false;
+ SyncPlanner failed(c6,fatal);step=failed.next(0);assert(failed.complete(step.ticket,status(order1,binding1,1),0));
+ assert(failed.next(200).kind==K::None && failed.faulted());
  std::cout<<"synchronization planner tests passed\n";
 }

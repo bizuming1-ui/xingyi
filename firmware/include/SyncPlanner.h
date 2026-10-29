@@ -10,6 +10,8 @@ class EpochSource {
  public:
   virtual ~EpochSource() = default;
   virtual bool generate(char out[37]) = 0; // cryptographically random UUID v4
+  // Only meaningful immediately after failure, on the same owning thread.
+  virtual bool failureMayRetry() const {return false;}
 };
 
 class SyncPlanner {
@@ -78,8 +80,10 @@ class SyncPlanner {
       if (!same) {
         // A stale server response is never allowed to move the device back.
         if (counter_.isReady() && desiredRevision_<=s.bindingRevision) { fault_=true; return {}; }
+        if (epochAttempted_ && elapsed(now,lastEpochAttempt_)<200) return {};
+        epochAttempted_=true;lastEpochAttempt_=now;
         char epoch[37]{};
-        if (!epochs_.generate(epoch)) { fault_=true; return {}; }
+        if (!epochs_.generate(epoch)) { if(!epochs_.failureMayRetry())fault_=true; return {}; }
         const auto r=counter_.bind(desiredOrder_,desiredRevision_,desiredBinding_,epoch);
         if (r==DurableCounter::Result::Pending || r==DurableCounter::Result::Frozen) return {};
         if (r!=DurableCounter::Result::Ok) { fault_=true; return {}; }
@@ -147,8 +151,8 @@ class SyncPlanner {
 
  private:
   DurableCounter& counter_; EpochSource& epochs_;
-  bool fault_=false, sentAny_=false, polled_=false, streamRegistered_=false, needBarrierStatus_=false, renewed_=false;
-  uint32_t lastSent_=0,lastPoll_=0,lastRenew_=0,nextTicket_=0;
+  bool fault_=false, sentAny_=false, polled_=false, streamRegistered_=false, needBarrierStatus_=false, renewed_=false, epochAttempted_=false;
+  uint32_t lastSent_=0,lastPoll_=0,lastRenew_=0,lastEpochAttempt_=0,nextTicket_=0;
   uint64_t desiredRevision_=0;
   char desiredOrder_[37]{},desiredBinding_[37]{},barrier_[37]{},nonce_[37]{};
   BarrierState remoteBarrier_=BarrierState::None;

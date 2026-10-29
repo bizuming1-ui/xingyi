@@ -10,6 +10,8 @@
 // A connected-status check is not a substitute for that lifecycle lock.
 class EspWifiEntropy final : public SecureEntropy {
  public:
+  // Disconnection before/after the entropy read is temporary, not corruption.
+  bool failureMayRetry() const override {return true;}
   bool fill(uint8_t* bytes,size_t length) override {
     if(!bytes || !length || WiFi.status()!=WL_CONNECTED)return false;
     esp_fill_random(bytes,length);

@@ -25,6 +25,7 @@
 #include "../../../firmware/include/TimeBootstrapExchange.h"
 #include "../../../firmware/include/EspMonotonicMillis.h"
 #include "../../../firmware/include/TimeWindowSynchronizer.h"
+#include "../../../firmware/include/FreeRtosRadioLifecycleLock.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -70,11 +71,15 @@ MbedTlsChannel tlsChannel(fixtureClock,fixtureNetworkYield,timeWindow,verifiedCo
 HttpRpcExchange actualFixtureHttp(tlsChannel,"project123.supabase.co","sb_publishable_test",1000);
 EspWifiStation wifiStation;
 WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
+FreeRtosRadioLifecycleLock radioLock;
+GuardedWifiSupervisor guardedWifi(radioLock,wifiSupervisor);
 EspWifiEntropy hardwareEntropy;
-TimeProof timeProof(hardwareEntropy);
+GuardedEntropy countingEntropy(radioLock,hardwareEntropy);
+GuardedEntropy networkEntropy(radioLock,hardwareEntropy);
+TimeProof timeProof(networkEntropy);
 TimeBootstrapExchange timeBootstrap(fixtureClock,fixtureNetworkYield,rawTcp,resolvedTcp,timeProof);
 TimeWindowSynchronizer timeSynchronizer(monotonicClock,timeWindow,timeBootstrap);
-RandomEpochSource hardwareEpochs(hardwareEntropy);
+RandomEpochSource hardwareEpochs(countingEntropy);
 SyncPlanner* planner = nullptr;
 volatile uint32_t observed = 0;
 volatile bool compileOnlyExercise = false;
@@ -98,7 +103,7 @@ void loop() {
     (void)tlsSession.handshake();
     tlsSession.reset();
     if(verifiedConnect.begin("project123.supabase.co",443,"fixture CA",false,1000)){(void)verifiedConnect.poll();verifiedConnect.close();}
-    wifiSupervisor.step(millis());
+    if(radioLock.valid())(void)guardedWifi.step(millis());
     uint64_t signedTime=0;
     if(timeProof.begin("00000000-0000-4000-8000-000000000001","0000000000000000000000000000000000000000000000000000000000000000",millis())) {
       char timeRequest[160]{};(void)TimeProofCodec::request(timeProof,timeRequest,sizeof(timeRequest));
