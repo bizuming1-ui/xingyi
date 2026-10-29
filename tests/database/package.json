@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "scripts": {"test": "node db-check.mjs"},
+  "scripts": {"test": "node db-check.mjs", "firmware-test": "node firmware-integration.mjs"},
   "devDependencies": {"@electric-sql/pglite": "^0.5.13"}
 }
