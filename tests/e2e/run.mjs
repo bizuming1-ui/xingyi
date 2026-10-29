@@ -7,8 +7,8 @@ import {fileURLToPath} from 'node:url';
 
 const root=resolve(fileURLToPath(new URL('../..',import.meta.url)));
 const temp=mkdtempSync(join(tmpdir(),'xingyi-e2e-'));
-async function runSuite(port,preview,testFile) {
- const server=spawn(process.execPath,[join(root,'node_modules/vite/bin/vite.js'),'--host','127.0.0.1','--port',String(port),'--strictPort'],{cwd:root,env:{...process.env,VITE_SUPABASE_URL:'https://example.supabase.co',VITE_SUPABASE_ANON_KEY:'test-publishable-key',VITE_DEVICE_PREVIEW:preview?'true':'false'},stdio:['ignore','pipe','pipe']});
+async function runSuite(port,preview,testFile,confirm=false) {
+ const server=spawn(process.execPath,[join(root,'node_modules/vite/bin/vite.js'),'--host','127.0.0.1','--port',String(port),'--strictPort'],{cwd:root,env:{...process.env,VITE_SUPABASE_URL:'https://example.supabase.co',VITE_SUPABASE_ANON_KEY:'test-publishable-key',VITE_DEVICE_PREVIEW:preview?'true':'false',VITE_DEVICE_CONFIRM_PREVIEW:confirm?'true':'false'},stdio:['ignore','pipe','pipe']});
  try {
   await new Promise((done,fail)=>{
    const timer=setTimeout(()=>fail(new Error('Vite did not start within 30 seconds')),30000);
@@ -29,4 +29,5 @@ try {
  writeFileSync(tar,brotliDecompressSync(compressed));execFileSync('tar',['-xf',tar,'-C',temp]);
  await runSuite(5174,false,'pr1-regression.mjs');
  await runSuite(5175,true,'device-preview.mjs');
+ await runSuite(5176,true,'device-confirm-preview.mjs',true);
 } finally {rmSync(temp,{recursive:true,force:true});}

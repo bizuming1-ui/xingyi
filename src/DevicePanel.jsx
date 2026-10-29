@@ -3,7 +3,7 @@ import {DeviceData,DeviceMonitor} from './device-data.js';
 
 // Explicitly experimental: confirmation is intentionally disabled until the
 // firmware, server migration and full device/browser handshake are integrated.
-export function DevicePanel({db,order,onBack}) {
+export function DevicePanel({db,order,onBack,onConfirm,confirmPreview=false}) {
   const data=useMemo(()=>new DeviceData(db),[db]);
   const [view,setView]=useState({type:'loading'}),[message,setMessage]=useState(''),[busy,setBusy]=useState(false);
   const generation=useRef(0);
@@ -42,7 +42,7 @@ export function DevicePanel({db,order,onBack}) {
     </div>
     <div className="device-actions">
       <button type="button" disabled={busy||!device||desired} onClick={bind}>请求绑定到此单</button>
-      <button type="button" disabled title="完整设备确认尚未接入">设备确认（未启用）</button>
+      {confirmPreview?<button type="button" disabled={busy||!device} onClick={()=>onConfirm(device.id)}>设备确认（测试）</button>:<button type="button" disabled title="完整设备确认尚未接入">设备确认（未启用）</button>}
     </div>
     <p className="device-note">此为隔离测试预览，不能用于生产。设备是否在线及是否全部同步，不能仅凭此页面判断。</p>
     {message&&<p className="device-message" role="status">{message}</p>}
