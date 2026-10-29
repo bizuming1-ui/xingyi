@@ -1,0 +1,69 @@
+// Experimental data adapter, not yet wired into the production page.
+// Values here are server-side drafts / requested bindings, not proof that the
+// device is online, synchronized, or safe to confirm.
+const uuid=value=>typeof value==='string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+const count=value=>Number.isSafeInteger(value) && value>=0;
+function validateDevice(device) {
+  if(!device || !uuid(device.id) || typeof device.label!=='string' || device.label.trim().length<1 || device.label.length>100) throw new Error('设备列表数据无效。');
+  const {desired_binding_id:binding,desired_order_id:order,desired_binding_revision:revision}=device;
+  const absent=binding===null && order===null && revision===null;
+  if(!absent && !(uuid(binding) && uuid(order) && count(revision) && revision>0)) throw new Error('设备绑定状态无效。');
+  return {id:device.id,label:device.label,desiredBindingId:binding,desiredOrderId:order,desiredRevision:revision};
+}
+export class DeviceData {
+  constructor(db) {this.db=db;}
+  async load(orderId) {
+    if(!uuid(orderId))throw new Error('生产单无效。');
+    // These independent reads are not a transactional snapshot. Neither one is
+    // suitable for deciding whether a device is online or fully synchronized.
+    const [listResult,draftResult]=await Promise.allSettled([
+      this.db.rpc('device_list'),
+      this.db.from('device_order_drafts').select('order_id,count').eq('order_id',orderId).maybeSingle()
+    ]);
+    if(listResult.status!=='fulfilled' || draftResult.status!=='fulfilled')throw new Error('设备数据刷新失败，请检查网络后重试。');
+    const list=listResult.value,draft=draftResult.value;
+    if(!list || !draft || list.error || draft.error)throw new Error('设备数据刷新失败，请检查网络后重试。');
+    if(!Array.isArray(list.data) || list.data.length>1)throw new Error('设备列表数据无效。');
+    const device=list.data.length?validateDevice(list.data[0]):null;
+    if(draft.data!==null && (!draft.data || draft.data.order_id!==orderId || !count(draft.data.count))) throw new Error('设备计数数据无效。');
+    return {orderId,device,draftCount:draft.data===null?0:draft.data.count};
+  }
+  async requestBinding(deviceId,orderId,confirmed) {
+    if(confirmed!==true)throw new Error('请先确认设备要绑定的生产单。');
+    if(!uuid(deviceId) || !uuid(orderId))throw new Error('设备或生产单无效。');
+    const {data,error}=await this.db.rpc('device_request_binding',{p_device:deviceId,p_order:orderId});
+    if(error)throw new Error('绑定请求未确认，请刷新状态后重试。');
+    if(!uuid(data))throw new Error('绑定回复无效，请刷新状态后重试。');
+    // The result is a desired binding only; offline counts must drain first.
+    return {requestedBindingId:data};
+  }
+}
+
+// One polling request at a time per active run. Starting a new order or stopping
+// invalidates late completions from previous runs, including errors. A slow
+// network can exceed the interval: this is not a one-second delivery guarantee.
+export class DeviceMonitor {
+  constructor(data,{interval=500,setTimer=setTimeout,clearTimer=clearTimeout}={}) {
+    if(!Number.isFinite(interval) || interval<200)throw new Error('刷新间隔无效。');
+    this.data=data;this.interval=interval;this.setTimer=setTimer;this.clearTimer=clearTimer;this.generation=0;this.timer=null;
+  }
+  start(orderId,onUpdate) {
+    if(!uuid(orderId) || typeof onUpdate!=='function')throw new Error('设备监控参数无效。');
+    this.stop();const generation=this.generation;
+    const poll=async()=>{
+      if(this.generation!==generation)return;
+      this.timer=null;
+      let event;
+      try {event={type:'snapshot',snapshot:await this.data.load(orderId)};}
+      catch {event={type:'error',message:'设备数据刷新失败，请检查网络。'};}
+      if(this.generation!==generation)return;
+      onUpdate(event);
+      if(this.generation===generation)this.timer=this.setTimer(poll,this.interval);
+    };
+    void poll();
+  }
+  stop() {
+    ++this.generation;
+    if(this.timer!==null){this.clearTimer(this.timer);this.timer=null;}
+  }
+}
