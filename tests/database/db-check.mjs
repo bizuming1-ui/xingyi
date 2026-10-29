@@ -1,0 +1,76 @@
+import {PGlite} from '@electric-sql/pglite';
+import {pgcrypto} from '@electric-sql/pglite/contrib/pgcrypto';
+import {readFile} from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const db=await PGlite.create({extensions:{pgcrypto}});
+const user='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', other='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const first='11111111-1111-4111-8111-111111111111', second='22222222-2222-4222-8222-222222222222';
+const e1='e0000000-0000-4000-8000-000000000001', e2='e0000000-0000-4000-8000-000000000002';
+const one=async(sql,args=[]) => (await db.query(sql,args)).rows[0];
+async function role(name,uid=user){ await db.exec('reset role'); await db.query("select set_config('request.jwt.claim.sub',$1,false)",[uid]); await db.exec(`set role ${name}`); }
+try {
+ await db.exec(`create role anon; create role authenticated; create schema auth; create schema extensions;
+ create table auth.users(id uuid primary key);
+ create function auth.uid() returns uuid language sql stable as $$ select nullif(current_setting('request.jwt.claim.sub', true),'')::uuid $$;
+ create publication supabase_realtime;`);
+ await db.exec(await readFile(new URL('../../supabase/schema.sql',import.meta.url),'utf8'));
+ await db.exec(await readFile(new URL('../../supabase/migrations/202610290001_device_ingest.sql',import.meta.url),'utf8'));
+ await db.query('insert into auth.users(id) values ($1),($2)',[user,other]);
+ await db.query("insert into public.app_settings(id,shared_user_id,admin_password_hash) values(true,$1,extensions.crypt('fixture-admin-pass',extensions.gen_salt('bf')))",[user]);
+ await db.query("insert into public.orders(id,order_no,product,total,current_count) values($1,'first','item',100,95),($2,'second','item',100,0)",[first,second]);
+ await role('anon');
+ await assert.rejects(()=>db.query('select public.device_create($1,$2)',['fixture-admin-pass','test']),/permission denied/);
+ await assert.rejects(()=>db.query('select * from public.device_endpoints'),/permission denied/);
+ await assert.rejects(()=>db.query('select * from public.device_counter_streams'),/permission denied/);
+ await assert.rejects(()=>db.query('select * from public.device_order_drafts'),/permission denied/);
+ await role('authenticated');
+ assert.equal((await one('select public.device_create($1,$2) as result',['wrong','test'])).result,null);
+ const created=(await one('select public.device_create($1,$2) as result',['fixture-admin-pass','test'])).result;
+ assert.match(created.secret,/^[0-9a-f]{64}$/);
+ assert.equal((await one('select count(*) as n from public.device_list()')).n,1);
+ await assert.rejects(()=>db.query('select * from public.device_endpoints'),/permission denied/);
+ const binding1=(await one('select public.device_request_binding($1,$2) as id',[created.id,first])).id;
+ assert.equal((await one('select public.device_request_binding($1,$2) as id',[created.id,first])).id,binding1);
+ await role('anon');
+ await assert.rejects(()=>db.query('select public.device_ingest($1,$2,$3,$4)',['0'.repeat(64),binding1,e1,10]),/设备认证失败/);
+ const ingest=async(binding,epoch,total)=> (await one('select public.device_ingest($1,$2,$3,$4) as result',[created.secret,binding,epoch,total])).result;
+ assert.equal((await ingest(binding1,e1,10)).accepted_total,10);
+ assert.equal((await ingest(binding1,e1,10)).accepted_total,10);
+ assert.equal((await ingest(binding1,e1,5)).accepted_total,10);
+ assert.equal((await ingest(binding1,e1,15)).accepted_total,15);
+ await assert.rejects(()=>ingest(binding1,e1,-1),/无效设备计数/);
+ await assert.rejects(()=>ingest('33333333-3333-4333-8333-333333333333',e1,1),/绑定无效/);
+ await role('authenticated');
+ assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[first])).count,15);
+ const binding2=(await one('select public.device_request_binding($1,$2) as id',[created.id,second])).id;
+ assert.notEqual(binding1,binding2);
+ await role('anon');
+ assert.equal((await one('select public.device_status($1) as result',[created.secret])).result.desired_binding_id,binding2);
+ await ingest(binding1,e1,20); // Late offline data remains on the old order.
+ await ingest(binding2,e2,3);
+ await role('authenticated');
+ assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[first])).count,20);
+ assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,3);
+ // Force near-limit fixture to ensure overflow rolls back the accepted stream total.
+ await db.exec('reset role');
+ await db.query('update public.device_order_drafts set count=9007199254740990 where order_id=$1',[second]);
+ await role('anon');
+ await assert.rejects(()=>ingest(binding2,e2,5),/设备计数已达到上限/);
+ assert.equal((await ingest(binding2,e2,3)).accepted_total,3);
+ await db.exec('reset role');
+ await db.query('update public.device_order_drafts set count=3 where order_id=$1',[second]);
+ await role('authenticated');
+ // Original PR1 manual confirmation and its cap are unaffected by device drafts.
+ const manual=(await one('select public.submit_production($1,$2,$3) as result',[first,10,'c0000000-0000-4000-8000-000000000001'])).result;
+ assert.equal(manual.applied,5); assert.equal(manual.current,100);
+ assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[first])).count,20);
+ await role('authenticated',other);
+ assert.equal((await one('select count(*) as n from public.device_order_drafts')).n,0);
+ await assert.rejects(()=>db.query('select public.device_list()'),/无访问权限/);
+ await role('authenticated');
+ assert.equal((await one('select public.device_revoke($1,$2) as ok',['fixture-admin-pass',created.id])).ok,true);
+ await role('anon');
+ await assert.rejects(()=>db.query('select public.device_status($1)',[created.secret]),/设备认证失败/);
+ await assert.rejects(()=>db.query('select public.device_ingest($1,$2,$3,$4)',[created.secret,binding1,e1,21]),/设备认证失败/);
+ console.log('isolated database tests passed: permissions, idempotency, offline rebinding, revoke, PR1 manual cap');
+} finally {await db.close()}
