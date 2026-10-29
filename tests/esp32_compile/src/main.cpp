@@ -12,6 +12,7 @@
 #include "../../../firmware/include/HttpResponseDecoder.h"
 #include "../../../firmware/include/HttpRpcExchange.h"
 #include "../../../firmware/include/EspWifiEntropy.h"
+#include "../../../firmware/include/EspWifiStation.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -39,6 +40,8 @@ FreeRtosSyncMailbox mailbox;
 SyncController* controller = nullptr;
 SyncNetworkWorker networkWorker(mailbox,fixtureExchange,"0000000000000000000000000000000000000000000000000000000000000000");
 FixtureEpochs epochs;
+EspWifiStation wifiStation;
+WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
 EspWifiEntropy hardwareEntropy;
 RandomEpochSource hardwareEpochs(hardwareEntropy);
 SyncPlanner* planner = nullptr;
@@ -54,6 +57,7 @@ void loop() {
   // Force real ESP32 compilation/linking of the unfinished component API.
   // This branch defaults to false; this project is still not a usable firmware.
   if (compileOnlyExercise && planner && controller) {
+    wifiSupervisor.step(millis());
     char randomEpoch[37]{};
     (void)hardwareEpochs.generate(randomEpoch);
     char responseBuffer[32]{};
