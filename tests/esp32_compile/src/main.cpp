@@ -14,6 +14,7 @@
 #include "../../../firmware/include/EspWifiEntropy.h"
 #include "../../../firmware/include/EspWifiStation.h"
 #include "../../../firmware/include/DeviceInput.h"
+#include "../../../firmware/include/EspAsyncDnsBackend.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -42,6 +43,8 @@ SyncController* controller = nullptr;
 DeviceInput* deviceInput = nullptr;
 SyncNetworkWorker networkWorker(mailbox,fixtureExchange,"0000000000000000000000000000000000000000000000000000000000000000");
 FixtureEpochs epochs;
+EspAsyncDnsBackend dnsBackend;
+AsyncDns dns(dnsBackend);
 EspWifiStation wifiStation;
 WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
 EspWifiEntropy hardwareEntropy;
@@ -60,6 +63,8 @@ void loop() {
   // This branch defaults to false; this project is still not a usable firmware.
   if (compileOnlyExercise && planner && controller && deviceInput) {
     (void)deviceInput->tick(digitalRead(4)==LOW,millis());
+    AsyncDns::Handle dnsHandle{};uint8_t dnsAddress[4]{};
+    if(dns.begin("project123.supabase.co",dnsHandle)){(void)dns.poll(dnsHandle,dnsAddress);(void)dns.expire(dnsHandle);}
     wifiSupervisor.step(millis());
     char randomEpoch[37]{};
     (void)hardwareEpochs.generate(randomEpoch);
