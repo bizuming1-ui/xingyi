@@ -37,6 +37,7 @@ try {
  await assert.rejects(()=>db.query('select * from public.device_endpoints'),/permission denied/);
  const binding1=(await one('select public.device_request_binding($1,$2) as id',[created.id,first])).id;
  assert.equal((await one('select public.device_request_binding($1,$2) as id',[created.id,first])).id,binding1);
+ assert.equal((await one('select desired_binding_revision as rev from public.device_list()')).rev,1);
  await role('anon');
  await assert.rejects(()=>db.query('select public.device_ingest($1,$2,$3,$4)',['0'.repeat(64),binding1,e1,10]),/设备认证失败/);
  const ingest=async(binding,epoch,total)=> (await one('select public.device_ingest($1,$2,$3,$4) as result',[created.secret,binding,epoch,total])).result;
@@ -50,8 +51,10 @@ try {
  assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[first])).count,15);
  const binding2=(await one('select public.device_request_binding($1,$2) as id',[created.id,second])).id;
  assert.notEqual(binding1,binding2);
+ assert.equal((await one('select desired_binding_revision as rev from public.device_list()')).rev,2);
  await role('anon');
- assert.equal((await one('select public.device_status($1) as result',[created.secret])).result.desired_binding_id,binding2);
+ const status=(await one('select public.device_status($1) as result',[created.secret])).result;
+ assert.equal(status.desired_binding_id,binding2); assert.equal(status.desired_binding_revision,2);
  await ingest(binding1,e1,20); // Late offline data remains on the old order.
  await ingest(binding2,e2,3);
  await role('authenticated');
@@ -106,6 +109,7 @@ try {
  await assert.rejects(()=>db.query('select public.device_confirmation_cancel($1)',[barrier]),/不能取消/);
  await role('anon');
  assert.equal((await one('select public.device_confirmation_status($1,$2) as result',[created.secret,barrier])).result.state,'completed');
+ assert.equal((await one('select public.device_confirmation_abort($1,$2) as result',[created.secret,barrier])).result.state,'completed');
  await ingest(binding2,e2,12); // New events after commit belong to the next batch.
  await role('authenticated');
  assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,2);
@@ -133,6 +137,18 @@ try {
  assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,3);
  assert.equal((await one('select current_count from public.orders where id=$1',[second])).current_count,100);
  assert.equal((await one('select public.device_confirmation_cancel($1) as ok',[collision])).ok,true);
+ // Device-detected unsafe input cancels before commit; counts stay available.
+ const cancelled=(await one('select public.device_confirmation_request($1,$2,$3) as id',[created.id,second,'d0000000-0000-4000-8000-000000000003'])).id;
+ await role('anon');
+ await one('select public.device_confirmation_freeze($1,$2,$3,$4,$5) as result',[created.secret,cancelled,binding2,e2,13]);
+ await assert.rejects(()=>db.query('select public.device_confirmation_abort($1,$2)',['0'.repeat(64),cancelled]),/设备认证失败/);
+ assert.equal((await one('select public.device_confirmation_abort($1,$2) as result',[created.secret,cancelled])).result.state,'cancelled');
+ assert.equal((await one('select public.device_confirmation_abort($1,$2) as result',[created.secret,cancelled])).result.state,'cancelled');
+ await ingest(binding2,e2,14);
+ await role('authenticated');
+ await assert.rejects(()=>db.query('select public.device_confirmation_commit($1)',[cancelled]),/设备未冻结同步或续约已过期/);
+ assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,4);
+
 
  await role('authenticated',other);
  assert.equal((await one('select count(*) as n from public.device_order_drafts')).n,0);

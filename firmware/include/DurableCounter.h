@@ -18,7 +18,9 @@ class CounterStorage {
 class DurableCounter {
  public:
   static constexpr uint64_t MAX_COUNT = 9007199254740991ULL;
-  enum class Result { Ok, NotReady, Invalid, Pending, Full, StorageError };
+  enum class Result { Ok, NotReady, Invalid, Pending, Frozen, Full, StorageError };
+  // Only pass a terminal outcome obtained from an authenticated server response.
+  enum class TerminalOutcome { Completed, Cancelled, Expired };
   struct Snapshot {
     uint32_t magic;
     uint32_t version;
@@ -26,9 +28,12 @@ class DurableCounter {
     uint64_t total;
     uint64_t acknowledged;
     uint64_t bindingRevision;
+    uint64_t frozenTotal;
     char orderId[37];
     char epochId[37];
-    uint8_t reserved[6];
+    char bindingId[37];
+    char barrierId[37];
+    uint8_t reserved[4];
     uint32_t crc;
   };
 
@@ -51,14 +56,15 @@ class DurableCounter {
     return Result::Ok;
   }
 
-  Result bind(const char* order, uint64_t revision, const char* epoch) {
+  Result bind(const char* order, uint64_t revision, const char* binding, const char* epoch) {
     if (!loaded_) return Result::NotReady;
-    if (!uuid(order) || !uuid(epoch) || revision == 0) return Result::Invalid;
-    if (isBound() && strcmp(state_.orderId, order) == 0 && state_.bindingRevision == revision && strcmp(state_.epochId, epoch) == 0) return Result::Ok;
+    if (!uuid(order) || !uuid(binding) || !uuid(epoch) || revision == 0 || revision > MAX_COUNT) return Result::Invalid;
+    if (isBound() && strcmp(state_.orderId, order) == 0 && state_.bindingRevision == revision && strcmp(state_.bindingId, binding) == 0 && strcmp(state_.epochId, epoch) == 0) return Result::Ok;
+    if (isFrozen()) return Result::Frozen;
     if (isBound() && state_.total != state_.acknowledged) return Result::Pending;
     if (isBound() && revision <= state_.bindingRevision) return Result::Invalid;
     Snapshot next = state_;
-    memcpy(next.orderId, order, 37); memcpy(next.epochId, epoch, 37);
+    memcpy(next.orderId, order, 37); memcpy(next.bindingId, binding, 37); memcpy(next.epochId, epoch, 37);
     next.bindingRevision = revision; next.total = 0; next.acknowledged = 0;
     return persist(next);
   }
@@ -74,10 +80,44 @@ class DurableCounter {
   Result acknowledge(const char* epoch, uint64_t total) {
     if (!loaded_ || !isBound()) return Result::NotReady;
     if (!uuid(epoch) || strcmp(state_.epochId, epoch) != 0 || total > state_.total) return Result::Invalid;
+    if (isFrozen() && total > state_.frozenTotal) return Result::Frozen;
     if (total <= state_.acknowledged) return Result::Ok; // duplicate/out-of-order response
     Snapshot next = state_; next.acknowledged = total;
     return persist(next);
   }
+
+  // Persist before notifying the server. While frozen, newly pressed counts
+  // remain durable in total but are withheld from upload as the next batch.
+  Result beginFreeze(const char* barrier) {
+    if (!loaded_ || !isBound()) return Result::NotReady;
+    if (!uuid(barrier)) return Result::Invalid;
+    if (isFrozen()) return strcmp(state_.barrierId,barrier)==0 ? Result::Ok : Result::Frozen;
+    if (pending()!=0) return Result::Pending;
+    Snapshot next=state_; memcpy(next.barrierId,barrier,37); next.frozenTotal=next.total;
+    return persist(next);
+  }
+
+  // This only releases local state; the caller MUST first obtain the matching
+  // authenticated completed/cancelled/expired status from the server. A local
+  // timeout or a reset is never sufficient evidence to unfreeze.
+  Result finishFreeze(const char* barrier, TerminalOutcome outcome) {
+    if (!loaded_ || !isBound()) return Result::NotReady;
+    if (!uuid(barrier) || !isFrozen() || strcmp(state_.barrierId,barrier)!=0) return Result::Invalid;
+    switch(outcome) {
+      case TerminalOutcome::Completed: case TerminalOutcome::Cancelled: case TerminalOutcome::Expired: break;
+      default: return Result::Invalid;
+    }
+    Snapshot next=state_; memset(next.barrierId,0,sizeof(next.barrierId)); next.frozenTotal=0;
+    return persist(next);
+  }
+
+  bool isReady() const { return loaded_ && isBound(); }
+  bool isFrozen() const { return state_.barrierId[0] != '\0'; }
+  bool canUpload() const { return isReady() && !isFrozen(); }
+  // On a physical press after freezing do not send freeze/renew again. Cancel
+  // remotely if possible; if commit wins the race, deferred counts remain.
+  bool canReportFrozen() const { return loaded_ && isFrozen() && state_.total == state_.frozenTotal && state_.acknowledged == state_.frozenTotal; }
+  uint64_t uploadableTotal() const { return isFrozen() ? state_.frozenTotal : state_.total; }
 
   const Snapshot& state() const { return state_; }
   bool isBound() const { return state_.orderId[0] != '\0'; }
@@ -107,14 +147,14 @@ class DurableCounter {
     return ~crc;
   }
   static bool equivalent(const Snapshot& a, const Snapshot& b) {
-    return a.magic==b.magic && a.version==b.version && a.generation==b.generation && a.total==b.total && a.acknowledged==b.acknowledged && a.bindingRevision==b.bindingRevision && memcmp(a.orderId,b.orderId,sizeof(a.orderId))==0 && memcmp(a.epochId,b.epochId,sizeof(a.epochId))==0 && memcmp(a.reserved,b.reserved,sizeof(a.reserved))==0 && a.crc==b.crc;
+    return a.magic==b.magic && a.version==b.version && a.generation==b.generation && a.total==b.total && a.acknowledged==b.acknowledged && a.bindingRevision==b.bindingRevision && memcmp(a.orderId,b.orderId,sizeof(a.orderId))==0 && memcmp(a.epochId,b.epochId,sizeof(a.epochId))==0 && a.frozenTotal==b.frozenTotal && memcmp(a.bindingId,b.bindingId,sizeof(a.bindingId))==0 && memcmp(a.barrierId,b.barrierId,sizeof(a.barrierId))==0 && memcmp(a.reserved,b.reserved,sizeof(a.reserved))==0 && a.crc==b.crc;
   }
   static bool valid(const Snapshot& s) {
-    return s.magic==MAGIC && s.version==1 && s.generation && s.total<=MAX_COUNT && s.acknowledged<=s.total && s.bindingRevision && uuid(s.orderId) && uuid(s.epochId) && s.crc==checksum(s);
+    return s.magic==MAGIC && s.version==2 && s.generation && s.total<=MAX_COUNT && s.acknowledged<=s.total && s.bindingRevision && s.bindingRevision<=MAX_COUNT && uuid(s.orderId) && uuid(s.epochId) && uuid(s.bindingId) && ((s.barrierId[0]=='\0' && s.frozenTotal==0) || (uuid(s.barrierId) && s.frozenTotal==s.acknowledged && s.frozenTotal<=s.total)) && s.crc==checksum(s);
   }
   Result persist(Snapshot next) {
     if (state_.generation == UINT64_MAX) return Result::Full;
-    next.magic=MAGIC; next.version=1; next.generation=state_.generation+1; next.crc=checksum(next);
+    next.magic=MAGIC; next.version=2; next.generation=state_.generation+1; next.crc=checksum(next);
     const unsigned target=active_^1u;
     if (!store_.write(target, &next, sizeof(next))) { loaded_=false; return Result::StorageError; }
     Snapshot verified{};

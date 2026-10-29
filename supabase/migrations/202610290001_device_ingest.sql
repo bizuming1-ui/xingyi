@@ -18,8 +18,10 @@ create table public.device_order_bindings (
   id uuid primary key default gen_random_uuid(),
   device_id uuid not null references public.device_endpoints(id),
   order_id uuid not null references public.orders(id),
+  revision bigint not null check (revision between 1 and 9007199254740991),
   created_at timestamptz not null default now(),
-  unique (device_id, id)
+  unique (device_id, id),
+  unique (device_id, revision)
 );
 alter table public.device_endpoints add constraint device_desired_binding_owned
   foreign key (id, desired_binding_id) references public.device_order_bindings(device_id, id);
@@ -69,11 +71,11 @@ begin
 end $$;
 
 create function public.device_list()
-returns table(id uuid, label text, desired_binding_id uuid, desired_order_id uuid, created_at timestamptz)
+returns table(id uuid, label text, desired_binding_id uuid, desired_order_id uuid, desired_binding_revision bigint, created_at timestamptz)
 language plpgsql security definer set search_path = public, pg_temp as $$
 begin
   if not public.is_operator() then raise exception '无访问权限'; end if;
-  return query select d.id, d.label, d.desired_binding_id, b.order_id, d.created_at
+  return query select d.id, d.label, d.desired_binding_id, b.order_id, b.revision, d.created_at
     from public.device_endpoints d left join public.device_order_bindings b on b.id=d.desired_binding_id
     where d.revoked_at is null order by d.created_at;
 end $$;
@@ -82,7 +84,7 @@ end $$;
 -- for delayed offline uploads; the device must drain before applying a new one.
 create function public.device_request_binding(p_device uuid, p_order uuid)
 returns uuid language plpgsql security definer set search_path = public, pg_temp as $$
-declare d public.device_endpoints; b public.device_order_bindings; new_id uuid;
+declare d public.device_endpoints; b public.device_order_bindings; new_id uuid; next_revision bigint;
 begin
   if not public.is_operator() then raise exception '无访问权限'; end if;
   select * into d from public.device_endpoints where id=p_device and revoked_at is null for update;
@@ -93,7 +95,9 @@ begin
     select * into b from public.device_order_bindings where id=d.desired_binding_id;
     if b.order_id=p_order then return b.id; end if;
   end if;
-  insert into public.device_order_bindings(device_id,order_id) values(d.id,p_order) returning id into new_id;
+  select coalesce(max(revision),0)+1 into next_revision from public.device_order_bindings where device_id=d.id;
+  if next_revision>9007199254740991 then raise exception '设备绑定版本已达上限'; end if;
+  insert into public.device_order_bindings(device_id,order_id,revision) values(d.id,p_order,next_revision) returning id into new_id;
   update public.device_endpoints set desired_binding_id=new_id where id=d.id;
   return new_id;
 end $$;
@@ -115,7 +119,7 @@ declare v_device_id uuid; result jsonb;
 begin
   v_device_id := public.device_authenticate(p_secret);
   if v_device_id is null then raise exception '设备认证失败' using errcode='28000'; end if;
-  select jsonb_build_object('device_id',d.id,'desired_binding_id',d.desired_binding_id,'desired_order_id',b.order_id)
+  select jsonb_build_object('device_id',d.id,'desired_binding_id',d.desired_binding_id,'desired_order_id',b.order_id,'desired_binding_revision',b.revision)
     into result from public.device_endpoints d left join public.device_order_bindings b on b.id=d.desired_binding_id where d.id=v_device_id and d.revoked_at is null;
   if result is null then raise exception '设备认证失败' using errcode='28000'; end if;
   return result;

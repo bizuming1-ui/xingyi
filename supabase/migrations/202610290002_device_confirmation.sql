@@ -115,7 +115,7 @@ end $$;
 -- Do not change the desired binding while a freeze request is unresolved.
 create or replace function public.device_request_binding(p_device uuid, p_order uuid)
 returns uuid language plpgsql security definer set search_path = public, pg_temp as $$
-declare d public.device_endpoints; b public.device_order_bindings; new_id uuid;
+declare d public.device_endpoints; b public.device_order_bindings; new_id uuid; next_revision bigint;
 begin
   if not public.is_operator() then raise exception '无访问权限'; end if;
   select * into d from public.device_endpoints where id=p_device and revoked_at is null for update;
@@ -129,7 +129,9 @@ begin
     select * into b from public.device_order_bindings where id=d.desired_binding_id;
     if b.order_id=p_order then return b.id; end if;
   end if;
-  insert into public.device_order_bindings(device_id,order_id) values(d.id,p_order) returning id into new_id;
+  select coalesce(max(revision),0)+1 into next_revision from public.device_order_bindings where device_id=d.id;
+  if next_revision>9007199254740991 then raise exception '设备绑定版本已达上限'; end if;
+  insert into public.device_order_bindings(device_id,order_id,revision) values(d.id,p_order,next_revision) returning id into new_id;
   update public.device_endpoints set desired_binding_id=new_id where id=d.id;
   return new_id;
 end $$;
@@ -158,7 +160,7 @@ declare v_device_id uuid; result jsonb;
 begin
   v_device_id:=public.device_authenticate(p_secret);
   if v_device_id is null then raise exception '设备认证失败' using errcode='28000'; end if;
-  select jsonb_build_object('device_id',d.id,'desired_binding_id',d.desired_binding_id,'desired_order_id',b.order_id,
+  select jsonb_build_object('device_id',d.id,'desired_binding_id',d.desired_binding_id,'desired_order_id',b.order_id,'desired_binding_revision',b.revision,
     'barrier_id',c.id,'barrier_order_id',c.order_id,'barrier_state',case when c.state='ready' and c.lease_until<=clock_timestamp() then 'expired' else c.state end)
   into result from public.device_endpoints d left join public.device_order_bindings b on b.id=d.desired_binding_id
     left join public.device_confirmation_barriers c on c.device_id=d.id and c.state in ('requested','ready')
@@ -176,6 +178,24 @@ begin
   if not found then raise exception '确认请求不存在'; end if;
   return jsonb_build_object('id',b.id,'order_id',b.order_id,'state',case when b.state='ready' and b.lease_until<=clock_timestamp() then 'expired' else b.state end,
     'lease_until',b.lease_until,'frozen_count',b.frozen_count,'result',b.result);
+end $$;
+
+-- The device can cancel a barrier after a physical press, storage problem or
+-- other unsafe condition. A concurrent commit and abort serialize on the device
+-- row; if commit wins, the device must retain later presses for the next batch.
+create function public.device_confirmation_abort(p_secret text, p_barrier uuid)
+returns jsonb language plpgsql security definer set search_path = public, pg_temp as $$
+declare device uuid; b public.device_confirmation_barriers;
+begin
+  device:=public.device_authenticate(p_secret);
+  if device is null then raise exception '设备认证失败' using errcode='28000'; end if;
+  perform 1 from public.device_endpoints where id=device and revoked_at is null for update;
+  if not found then raise exception '设备认证失败' using errcode='28000'; end if;
+  select * into b from public.device_confirmation_barriers where id=p_barrier and device_id=device for update;
+  if not found then raise exception '确认请求不存在'; end if;
+  if b.state='completed' then return jsonb_build_object('state',b.state); end if;
+  if b.state<>'cancelled' then update public.device_confirmation_barriers set state='cancelled' where id=b.id; end if;
+  return jsonb_build_object('state','cancelled');
 end $$;
 
 -- Only authenticated operators can commit; a retry returns the prior result.
@@ -247,6 +267,6 @@ begin
   return jsonb_build_object('accepted_total',previous,'binding_id',binding.id,'order_id',binding.order_id);
 end $$;
 
-revoke all on function public.device_confirmation_request(uuid,uuid,uuid),public.device_confirmation_freeze(text,uuid,uuid,uuid,bigint),public.device_confirmation_renew(text,uuid,uuid,uuid,bigint,uuid),public.device_confirmation_status(text,uuid),public.device_confirmation_commit(uuid),public.device_confirmation_cancel(uuid),public.device_confirmation_view(uuid) from public, anon, authenticated;
+revoke all on function public.device_confirmation_request(uuid,uuid,uuid),public.device_confirmation_freeze(text,uuid,uuid,uuid,bigint),public.device_confirmation_renew(text,uuid,uuid,uuid,bigint,uuid),public.device_confirmation_status(text,uuid),public.device_confirmation_commit(uuid),public.device_confirmation_cancel(uuid),public.device_confirmation_view(uuid),public.device_confirmation_abort(text,uuid) from public, anon, authenticated;
 grant execute on function public.device_confirmation_request(uuid,uuid,uuid),public.device_confirmation_commit(uuid),public.device_confirmation_cancel(uuid),public.device_confirmation_view(uuid) to authenticated;
-grant execute on function public.device_confirmation_freeze(text,uuid,uuid,uuid,bigint),public.device_confirmation_renew(text,uuid,uuid,uuid,bigint,uuid),public.device_confirmation_status(text,uuid) to anon, authenticated;
+grant execute on function public.device_confirmation_freeze(text,uuid,uuid,uuid,bigint),public.device_confirmation_renew(text,uuid,uuid,uuid,bigint,uuid),public.device_confirmation_status(text,uuid),public.device_confirmation_abort(text,uuid) to anon, authenticated;

@@ -20,14 +20,16 @@ int main() {
   constexpr auto order="00000000-0000-4000-8000-000000000001";
   constexpr auto nextOrder="00000000-0000-4000-8000-000000000002";
   constexpr auto epoch="10000000-0000-4000-8000-000000000001";
+  constexpr auto binding="20000000-0000-4000-8000-000000000001";
+  constexpr auto binding2="20000000-0000-4000-8000-000000000002";
   constexpr auto epoch2="10000000-0000-4000-8000-000000000002";
   using R=DurableCounter::Result;
   MemoryStore store; DurableCounter q(store);
   assert(q.add(1)==R::NotReady);
   assert(q.load()==R::Ok);
-  assert(q.bind(order,1,epoch)==R::Ok);
+  assert(q.bind(order,1,binding,epoch)==R::Ok);
   assert(q.add(10)==R::Ok && q.pending()==10);
-  assert(q.bind(nextOrder,2,epoch2)==R::Pending);
+  assert(q.bind(nextOrder,2,binding2,epoch2)==R::Pending);
   // A failed durable write must not advance the in-memory count.
   store.failWrite=true; assert(q.add(1)==R::StorageError && q.pending()==10); store.failWrite=false;
   assert(q.add(1)==R::NotReady); // uncertain write requires recovery before accepting new counts
@@ -37,8 +39,8 @@ int main() {
   assert(restarted.acknowledge(epoch,11)==R::Invalid);
   assert(restarted.acknowledge(epoch2,10)==R::Invalid);
   assert(restarted.acknowledge(epoch,10)==R::Ok);
-  assert(restarted.bind(nextOrder,1,epoch2)==R::Invalid);
-  assert(restarted.bind(nextOrder,2,epoch2)==R::Ok && restarted.pending()==0);
+  assert(restarted.bind(nextOrder,1,binding2,epoch2)==R::Invalid);
+  assert(restarted.bind(nextOrder,2,binding2,epoch2)==R::Ok && restarted.pending()==0);
   assert(restarted.add(7)==R::Ok);
   DurableCounter secondRestart(store); assert(secondRestart.load()==R::Ok && secondRestart.pending()==7);
   // Any corrupt slot blocks operation rather than silently resetting counts.
