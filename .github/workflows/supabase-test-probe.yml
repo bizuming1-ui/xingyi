@@ -21,14 +21,13 @@ jobs:
           verified=$(openssl verify -show_chain -verify_hostname "$host" -CAfile /etc/ssl/certs/ca-certificates.crt -untrusted "$RUNNER_TEMP/chain.txt" "$RUNNER_TEMP/cert-1.pem")
           echo "$verified"
           echo "::notice title=Verified chain::${verified//$'\n'/' | '}"
-          last=$(ls "$RUNNER_TEMP"/cert-*.pem | sort -V | tail -1)
-          issuer=$(openssl x509 -in "$last" -noout -issuer -nameopt RFC2253 | sed 's/^issuer=//')
+          root_subject=$(printf '%s\n' "$verified" | grep 'depth=' | tail -1 | sed 's/^.*depth=[0-9]*: //')
           root=''
           for cert in /etc/ssl/certs/*.pem; do
-            subject=$(openssl x509 -in "$cert" -noout -subject -nameopt RFC2253 2>/dev/null | sed 's/^subject=//' || true)
-            if [[ "$subject" == "$issuer" ]]; then root="$cert"; break; fi
+            subject=$(openssl x509 -in "$cert" -noout -subject 2>/dev/null | sed 's/^subject=//' || true)
+            if [[ "$subject" == "$root_subject" ]]; then root="$cert"; break; fi
           done
-          test -n "$root" || { echo 'Could not identify root from operating system trust store'; exit 1; }
+          test -n "$root" || { echo "::error::Could not identify trusted root: $root_subject"; exit 1; }
           echo "::notice title=Trusted root identity::$(openssl x509 -in "$root" -noout -subject -fingerprint -sha256 | tr '\n' ' ')"
           echo "::notice title=Trusted root PEM base64::$(base64 -w0 "$root")"
           curl --silent --show-error --max-time 15 --dump-header "$RUNNER_TEMP/headers.txt" --output /dev/null \
