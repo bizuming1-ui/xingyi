@@ -1,9 +1,11 @@
 # Isolated device credential vault (NOT production)
 
 Operators can view the active device ID and, after entering the administrator
-password, save an existing device secret or recover a previously saved one. The
-first backup must be imported by the user from their local configuration; it
-cannot be reconstructed from the database hash. An already leaked secret stays
+password, save an existing device secret or recover a previously saved one. A new device secret is automatically generated during provisioning; the browser
+then attempts an encrypted backup and verifies it by decrypting. If either step
+is interrupted, the backup must not be assumed to exist. Existing devices need
+their secret imported once from local configuration; it cannot be reconstructed
+from the database hash. An already leaked secret stays
 compromised after backup; rotation requires a separate carefully verified
 process, including handling unsynchronized device counts. This feature does
 not rotate credentials, bind a device, or fix ESP32 connectivity.

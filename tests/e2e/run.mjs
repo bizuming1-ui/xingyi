@@ -36,5 +36,6 @@ try {
  await runSuite(5280,true,'isolated-qr.mjs',false,true,'https://bizuming1-ui.github.io/xingyi-isolated-test/');
  await runSuite(5281,true,'isolated-qr.mjs',false,true,'',true);
  await runSuite(5282,false,'public-pages-demo.mjs');
- await runSuite(5283,true,'device-vault.mjs');
+ await runSuite(5283,true,'device-vault.mjs',false,true);
+ await runSuite(5284,true,'device-provision-vault.mjs',false,true);
 } finally {rmSync(temp,{recursive:true,force:true});}
