@@ -1,7 +1,7 @@
 name: Device RPC codec tests
 on:
   pull_request:
-    paths: ['firmware/**', 'tests/rpc_codec.cpp', 'tests/rpc_worker.cpp', 'tests/run-rpc-tests.sh', '.github/workflows/rpc-codec-tests.yml']
+    paths: ['firmware/**', 'tests/rpc_codec.cpp', 'tests/rpc_worker.cpp', 'tests/sync_bridge.cpp', 'tests/free_rtos_mailbox.cpp', 'tests/mocks/freertos/**', 'tests/run-rpc-tests.sh', '.github/workflows/rpc-codec-tests.yml']
 permissions:
   contents: read
 jobs:

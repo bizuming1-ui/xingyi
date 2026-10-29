@@ -7,6 +7,7 @@
 #include "../../../firmware/include/SyncPlanner.h"
 #include "../../../firmware/include/RpcCodec.h"
 #include "../../../firmware/include/RpcWorker.h"
+#include "../../../firmware/include/FreeRtosSyncMailbox.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -20,6 +21,9 @@ class FixtureExchange : public RpcExchange {
   Response post(const char*,const char*,size_t,char*,size_t) override { return {}; }
 };
 FixtureExchange fixtureExchange;
+FreeRtosSyncMailbox mailbox;
+SyncController* controller = nullptr;
+SyncNetworkWorker networkWorker(mailbox,fixtureExchange,"0000000000000000000000000000000000000000000000000000000000000000");
 FixtureEpochs epochs;
 SyncPlanner* planner = nullptr;
 volatile uint32_t observed = 0;
@@ -27,13 +31,15 @@ volatile bool compileOnlyExercise = false;
 
 void setup() {
   pinMode(4, INPUT_PULLUP);
-  if (storage.begin() && counter.load() == DurableCounter::Result::Ok) planner = new SyncPlanner(counter,epochs);
+  if (storage.begin() && counter.load() == DurableCounter::Result::Ok) { planner = new SyncPlanner(counter,epochs); if (mailbox.valid()) controller = new SyncController(*planner,mailbox); }
 }
 void loop() {
   observed += button.tick(digitalRead(4) == LOW, millis());
   // Force real ESP32 compilation/linking of the unfinished component API.
   // This branch defaults to false; this project is still not a usable firmware.
-  if (compileOnlyExercise && planner) {
+  if (compileOnlyExercise && planner && controller) {
+    controller->step(millis());
+    networkWorker.step();
     (void)counter.bind("00000000-0000-4000-8000-000000000001", 1,
                        "20000000-0000-4000-8000-000000000001",
                        "10000000-0000-4000-8000-000000000001");
