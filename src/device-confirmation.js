@@ -15,6 +15,12 @@ function recordValid(r) {
     (r.barrierId===null || uuid(r.barrierId)) && typeof r.commitAttempted==='boolean' &&
     (r.terminal===null || (r.terminal?.state==='completed' && validResult(r.terminal.result)) || r.terminal?.state==='cancelled');
 }
+function verifiedOpen(value,deviceId) {
+  if(value===null)return null;
+  if(!value || !uuid(value.id) || !uuid(value.request_id) || value.device_id!==deviceId || !uuid(value.order_id) ||
+     !['requested','ready','expired'].includes(value.state)) throw new Error('设备未结束请求状态无效，请勿继续。');
+  return value;
+}
 function verifiedView(value,record) {
   if(!value || value.id!==record.barrierId || value.order_id!==record.orderId ||
      !['requested','ready','expired','completed','cancelled'].includes(value.state)) throw new Error('设备确认状态无效，请勿继续。');
@@ -61,6 +67,10 @@ export class DeviceConfirmation {
       if(record) {
         if(record.deviceId!==deviceId || record.orderId!==orderId || record.terminal)throw new Error('存在未处理的设备确认，请先恢复或处理。');
       } else {
+        // Never create a new local identity while another browser has an open
+        // barrier. The server unique index still resolves cross-device races.
+        const open=await this.readOpen(deviceId);
+        if(open)throw new Error('设备存在未结束的确认，请先恢复该请求。');
         const id=this.newId();if(!uuid(id))throw new Error('无法生成安全请求编号。');
         record={version:1,requestId:id,deviceId,orderId,barrierId:null,commitAttempted:false,terminal:null};
         this.save(record); // must succeed before a request can reach the server
@@ -71,6 +81,27 @@ export class DeviceConfirmation {
         record.barrierId=barrier;this.save(record);
       }
       return record;
+    });
+  }
+  async readOpen(deviceId) {
+    if(!uuid(deviceId))throw new Error('设备无效。');
+    return verifiedOpen(await this.call('device_confirmation_open',{p_device:deviceId}),deviceId);
+  }
+  async inspectOpen(deviceId) {
+    return this.exclusive(()=>this.readOpen(deviceId));
+  }
+  async recoverOpen({deviceId,orderId,operatorPaused}) {
+    return this.exclusive(async()=>{
+      if(operatorPaused!==true)throw new Error('请先提醒操作员暂停按键。');
+      if(!uuid(deviceId)||!uuid(orderId))throw new Error('设备或生产单无效。');
+      if(this.load())throw new Error('本浏览器存在未处理的设备确认，不能覆盖。');
+      const open=await this.readOpen(deviceId);
+      if(!open)throw new Error('没有可恢复的未结束设备确认。');
+      if(open.order_id!==orderId)throw new Error('设备正在处理其他生产单，请先处理原请求。');
+      // Another browser could have a commit in flight; keep that possibility
+      // visible and let server-side device/barrier locks arbitrate all actions.
+      const record={version:1,requestId:open.request_id,deviceId,orderId,barrierId:open.id,commitAttempted:true,terminal:null};
+      this.save(record);return record;
     });
   }
   async readView(record) {

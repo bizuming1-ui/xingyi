@@ -16,11 +16,13 @@ try {
  await db.exec(await readFile(new URL('../../supabase/schema.sql',import.meta.url),'utf8'));
  await db.exec(await readFile(new URL('../../supabase/migrations/202610290001_device_ingest.sql',import.meta.url),'utf8'));
  await db.exec(await readFile(new URL('../../supabase/migrations/202610290002_device_confirmation.sql',import.meta.url),'utf8'));
+ await db.exec(await readFile(new URL('../../supabase/migrations/202610290003_device_confirmation_recovery.sql',import.meta.url),'utf8'));
  await db.query('insert into auth.users(id) values ($1),($2)',[user,other]);
  await db.query("insert into public.app_settings(id,shared_user_id,admin_password_hash) values(true,$1,extensions.crypt('fixture-admin-pass',extensions.gen_salt('bf')))",[user]);
  await db.query("insert into public.orders(id,order_no,product,total,current_count) values($1,'first','item',100,95),($2,'second','item',100,0)",[first,second]);
  await role('anon');
  await assert.rejects(()=>db.query('select public.device_create($1,$2)',['fixture-admin-pass','test']),/permission denied/);
+ await assert.rejects(()=>db.query('select public.device_confirmation_open($1)',[first]),/permission denied/);
  await assert.rejects(()=>db.query('select * from public.device_endpoints'),/permission denied/);
  await assert.rejects(()=>db.query('select * from public.device_counter_streams'),/permission denied/);
  await assert.rejects(()=>db.query('select * from public.device_order_drafts'),/permission denied/);
@@ -34,6 +36,8 @@ try {
  const created=(await one('select public.device_create($1,$2) as result',['fixture-admin-pass','test'])).result;
  assert.match(created.secret,/^[0-9a-f]{64}$/);
  assert.equal((await one('select count(*) as n from public.device_list()')).n,1);
+ assert.equal((await one('select public.device_confirmation_open($1) as result',[created.id])).result,null);
+ await assert.rejects(()=>db.query('select public.device_confirmation_open($1)',[first]),/设备不存在/);
  await assert.rejects(()=>db.query('select * from public.device_endpoints'),/permission denied/);
  const binding1=(await one('select public.device_request_binding($1,$2) as id',[created.id,first])).id;
  assert.equal((await one('select public.device_request_binding($1,$2) as id',[created.id,first])).id,binding1);
@@ -80,6 +84,9 @@ try {
  await role('authenticated');
  const req='d0000000-0000-4000-8000-000000000001';
  const barrier=(await one('select public.device_confirmation_request($1,$2,$3) as id',[created.id,second,req])).id;
+ const open=(await one('select public.device_confirmation_open($1) as result',[created.id])).result;
+ assert.deepEqual(open,{id:barrier,request_id:req,device_id:created.id,order_id:second,state:'requested'});
+ assert.equal(Object.hasOwn(open,'lease_nonce'),false);
  assert.equal((await one('select public.device_confirmation_request($1,$2,$3) as id',[created.id,second,req])).id,barrier);
  await assert.rejects(()=>db.query('select public.device_confirmation_request($1,$2,$3)',[null,second,req]),/请求参数无效/);
  await assert.rejects(()=>db.query('select public.device_confirmation_request($1,$2,$3)',[created.id,first,req]),/重复请求参数不一致/);
@@ -99,10 +106,12 @@ try {
  await assert.rejects(()=>db.query('select public.device_confirmation_renew($1,$2,$3,$4,$5,$6)',[created.secret,barrier,binding2,e2,10,frozen.lease_nonce]),/续约令牌已使用/);
  await role('authenticated');
  assert.equal((await one('select public.device_confirmation_view($1) as result',[barrier])).result.state,'ready');
+ assert.equal((await one('select public.device_confirmation_open($1) as result',[created.id])).result.state,'ready');
  await assert.rejects(()=>db.query('select public.device_request_binding($1,$2)',[created.id,first]),/确认请求/);
  const confirmed=(await one('select public.device_confirmation_commit($1) as result',[barrier])).result;
  assert.deepEqual(confirmed,{requested:10,applied:5,current:100});
  assert.deepEqual((await one('select public.device_confirmation_commit($1) as result',[barrier])).result,confirmed);
+ assert.equal((await one('select public.device_confirmation_open($1) as result',[created.id])).result,null);
  const history=(await one('select public.admin_history($1,$2) as result',['fixture-admin-pass',second])).result;
  assert.equal(history.length,2); assert.ok(history.some(row=>row.requested===10 && row.applied===5 && row.resulting_count===100));
  assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,0);
@@ -124,10 +133,12 @@ try {
  assert.equal((await one('select public.device_confirmation_freeze($1,$2,$3,$4,$5) as result',[created.secret,expire,binding2,e2,12])).result.state,'expired');
  await ingest(binding2,e2,13); // Expired freeze must not block later uploads.
  await role('authenticated');
+ assert.equal((await one('select public.device_confirmation_open($1) as result',[created.id])).result.state,'expired');
  await assert.rejects(()=>db.query('select public.device_confirmation_commit($1)',[expire]),/续约已过期/);
  assert.equal((await one('select count from public.device_order_drafts where order_id=$1',[second])).count,3);
  assert.equal((await one('select public.device_confirmation_cancel($1) as ok',[expire])).ok,true);
  assert.equal((await one('select public.device_confirmation_cancel($1) as ok',[expire])).ok,true);
+ assert.equal((await one('select public.device_confirmation_open($1) as result',[created.id])).result,null);
  // A request ID already used by PR1 must fail atomically: no draft or order loss.
  const collision=(await one('select public.device_confirmation_request($1,$2,$3) as id',[created.id,second,'c0000000-0000-4000-8000-000000000002'])).id;
  await role('anon');
@@ -153,6 +164,7 @@ try {
  await role('authenticated',other);
  assert.equal((await one('select count(*) as n from public.device_order_drafts')).n,0);
  await assert.rejects(()=>db.query('select public.device_list()'),/无访问权限/);
+ await assert.rejects(()=>db.query('select public.device_confirmation_open($1)',[created.id]),/无访问权限/);
  await role('authenticated');
  await assert.rejects(()=>db.query('select public.device_revoke($1,$2)',['fixture-admin-pass',created.id]),/不能直接撤销/);
  await role('anon');

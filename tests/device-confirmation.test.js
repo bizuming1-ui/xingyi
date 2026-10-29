@@ -15,19 +15,20 @@ class Locks {
   request(_name,_options,callback){const next=this.tail.then(callback);this.tail=next.catch(()=>{});return next;}
 }
 function fixture() {
-  const storage=new Storage(),locks=new Locks();let state='requested',lostRequest=false,lostCommit=false,failAfterCommit=false;
+  const storage=new Storage(),locks=new Locks();let state='requested',openBarrier=false,lostRequest=false,lostCommit=false,failAfterCommit=false;
   const calls=[];let commits=0,requests=0;
   const result={requested:8,applied:5,current:100};
   const db={async rpc(name,args){
     calls.push([name,args]);
-    if(name==='device_confirmation_request') {requests++;assert.equal(args.p_request,request);if(lostRequest){lostRequest=false;return {error:{}};}return {data:barrier};}
+    if(name==='device_confirmation_open')return {data:openBarrier && state!=='completed' && state!=='cancelled'?{id:barrier,request_id:request,device_id:device,order_id:order,state}:null};
+    if(name==='device_confirmation_request') {requests++;openBarrier=true;assert.equal(args.p_request,request);if(lostRequest){lostRequest=false;return {error:{}};}return {data:barrier};}
     if(name==='device_confirmation_view')return {data:{id:barrier,order_id:order,state,frozen_count:8,result:state==='completed'?result:null}};
     if(name==='device_confirmation_commit') {commits++;state='completed';if(failAfterCommit)storage.fail=true;if(lostCommit){lostCommit=false;return {error:{}};}return {data:result};}
     if(name==='device_confirmation_cancel') {if(state==='completed')return {error:{}};state='cancelled';return {data:true};}
     throw Error('unknown');
   }};
   const controller=()=>new DeviceConfirmation({db,storage,locks,newId:()=>request});
-  return {storage,controller,calls,db,setState:s=>state=s,loseRequest:()=>lostRequest=true,loseCommit:()=>lostCommit=true,failAfterCommit:()=>failAfterCommit=true,
+  return {storage,controller,calls,db,open:()=>openBarrier=true,setState:s=>state=s,loseRequest:()=>lostRequest=true,loseCommit:()=>lostCommit=true,failAfterCommit:()=>failAfterCommit=true,
     counts:()=>({requests,commits}),result};
 }
 test('lost request is recovered with same UUID and without duplicate local requests',async()=>{
@@ -58,9 +59,9 @@ test('cancel and expired states do not silently clear unresolved records',async(
 test('storage, pause and cross-tab safeguards fail closed',async()=>{
   const f=fixture(),c=f.controller();
   await assert.rejects(()=>c.start({deviceId:device,orderId:order,operatorPaused:false}),/暂停/);
-  f.storage.fail=true;await assert.rejects(()=>c.start({deviceId:device,orderId:order,operatorPaused:true}),/quota/);assert.equal(f.calls.length,0);
+  f.storage.fail=true;await assert.rejects(()=>c.start({deviceId:device,orderId:order,operatorPaused:true}),/quota/);assert.equal(f.counts().requests,0);
   f.storage.fail=false;f.storage.setItem(DEVICE_CONFIRMATION_KEY,'broken');
-  await assert.rejects(()=>c.start({deviceId:device,orderId:order,operatorPaused:true}),/损坏/);assert.equal(f.calls.length,0);
+  await assert.rejects(()=>c.start({deviceId:device,orderId:order,operatorPaused:true}),/损坏/);assert.equal(f.counts().requests,0);
   const noLocks=new DeviceConfirmation({db:{},storage:f.storage,locks:null});
   await assert.rejects(()=>noLocks.current(),/多标签页/);
 });
@@ -90,4 +91,33 @@ test('untrusted status and confirmation results are rejected',async()=>{
   const original=f.db.rpc;f.db.rpc=async(name,args)=>name==='device_confirmation_view'?{data:{id:barrier,order_id:'50000000-0000-4000-8000-000000000001',state:'ready',frozen_count:8}}:original(name,args);
   await assert.rejects(()=>c.confirm({operatorPaused:true}),/状态无效/);assert.equal(f.counts().commits,0);
   assert.equal((await c.current()).terminal,null);
+});
+
+test('a new browser discovers and safely adopts an existing open barrier',async()=>{
+  const f=fixture(),c=f.controller();f.open();
+  await assert.rejects(()=>c.start({deviceId:device,orderId:order,operatorPaused:true}),/先恢复/);
+  assert.equal(f.counts().requests,0);assert.equal(await c.current(),null);
+  assert.equal((await c.inspectOpen(device)).id,barrier);
+  await assert.rejects(()=>c.recoverOpen({deviceId:device,orderId:order,operatorPaused:false}),/暂停/);
+  await assert.rejects(()=>c.recoverOpen({deviceId:device,orderId:'50000000-0000-4000-8000-000000000001',operatorPaused:true}),/其他生产单/);
+  const adopted=await c.recoverOpen({deviceId:device,orderId:order,operatorPaused:true});
+  assert.equal(adopted.requestId,request);assert.equal(adopted.barrierId,barrier);assert.equal(adopted.commitAttempted,true);
+  await assert.rejects(()=>c.recoverOpen({deviceId:device,orderId:order,operatorPaused:true}),/不能覆盖/);
+  f.setState('expired');assert.equal((await c.observe()).state,'expired');
+  await c.cancel();await c.acknowledge();assert.equal(await c.current(),null);
+});
+test('invalid open-barrier response cannot be mistaken for an empty state',async()=>{
+  const f=fixture(),c=f.controller();f.db.rpc=async()=>({data:undefined});
+  await assert.rejects(()=>c.start({deviceId:device,orderId:order,operatorPaused:true}),/状态无效/);
+  assert.equal(await c.current(),null);
+});
+
+test('a competing phone after preflight cannot erase an uncertain local request',async()=>{
+  const f=fixture(),c=f.controller();
+  const original=f.db.rpc;
+  f.db.rpc=async(name,args)=>name==='device_confirmation_request'?{error:{message:'open barrier conflict'}}:original(name,args);
+  await assert.rejects(()=>c.start({deviceId:device,orderId:order,operatorPaused:true}));
+  const saved=await c.current();assert.equal(saved.requestId,request);assert.equal(saved.barrierId,null);
+  f.open();await assert.rejects(()=>c.recoverOpen({deviceId:device,orderId:order,operatorPaused:true}),/不能覆盖/);
+  assert.deepEqual(await c.current(),saved);
 });
