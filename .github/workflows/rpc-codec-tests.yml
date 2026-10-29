@@ -1,0 +1,21 @@
+name: Device RPC codec tests
+on:
+  pull_request:
+    paths: ['firmware/**', 'tests/rpc_codec.cpp', 'tests/rpc_worker.cpp', 'tests/run-rpc-tests.sh', '.github/workflows/rpc-codec-tests.yml']
+permissions:
+  contents: read
+jobs:
+  codec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pinned ArduinoJson source
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error https://codeload.github.com/bblanchon/ArduinoJson/tar.gz/refs/tags/v6.21.5 -o "$RUNNER_TEMP/arduinojson.tar.gz"
+          echo "27cd4891596fa1a70e35851231958ea2b0719a37d0af110e9e085eb5500be0c3  $RUNNER_TEMP/arduinojson.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/arduinojson.tar.gz" -C "$RUNNER_TEMP"
+      - name: Run codec tests
+        run: ./tests/run-rpc-tests.sh
+        env:
+          ARDUINOJSON_INCLUDE: ${{ runner.temp }}/ArduinoJson-6.21.5/src

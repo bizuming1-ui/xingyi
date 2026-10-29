@@ -28,3 +28,9 @@
 后续 `202610290002_device_confirmation.sql` 新增了未部署的服务端冻结、两秒租约和原子确认基础，协议及限制见 `CONFIRMATION.md`。设备端冻结/排空握手、断电后的跨批恢复、生产单删除/归档时的处理、Realtime 推送、真实并发安全和速率限制等仍未实现；在这些内容以及真实 Supabase 与实板测试完成前，不可将迁移部署到生产。`tests/database` 使用完全隔离的 PGlite 测试迁移和 PR1 手动封顶；它不是 Supabase 并发或断网测试。
 
 `SyncPlanner.h` 是不含网络传输的单线程调度核心；主机测试覆盖旧绑定先排空、响应丢失重试、确认冻结、误按取消、重启恢复和异常响应停机。它不代表完整固件。详见 `CONFIRMATION.md`。
+
+## RPC 请求与回复组件（尚未联网）
+
+`RpcCodec.h` 将同步调度命令映射到已设计的 Supabase RPC，并验证 JSON 结构、UUID、计数上限、冻结状态和续约 nonce；无效或不匹配的回复不会被当成成功。`RpcWorker.h` 使用可替换的传输接口执行编码与解码，只返回安全的状态码，并清除请求及响应缓冲区。它**不包含实际 HTTPS/Wi-Fi 传输**：未来传输层必须在独立网络任务运行、校验服务器证书和主机名、禁止重定向、限制响应大小和超时，且不得记录密钥或请求体。
+
+RPC 组件的主机测试使用固定版本 ArduinoJson 6.21.5。下载依赖后设置 `ARDUINOJSON_INCLUDE` 指向该库的 `src` 目录，再运行 `./tests/run-rpc-tests.sh`；GitHub Actions 会核对下载包的 SHA-256。测试使用模拟响应，不证明真实 Supabase、TLS、网络任务或设备行为。
