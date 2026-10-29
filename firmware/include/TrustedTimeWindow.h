@@ -11,7 +11,7 @@ class MonotonicMillis64 {
 };
 
 // Conservatively bounds actual UTC after a verified time proof. This class does
-// NOT authenticate proofs, set the system clock, or implement TrustedTime.
+// NOT authenticate proofs or set the system clock.
 // Only feed it an Ok result of TimeBootstrapExchange, measured from immediately
 // before fetch to immediately after it on this SAME boot-local clock. The
 // server signs floor(UTC seconds) during that interval. Invalid samples discard

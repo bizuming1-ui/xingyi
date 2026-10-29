@@ -28,19 +28,31 @@ class VerifiedConnect {
   // Verified means setup succeeded; later I/O must still check TLS status.
   State state() const {return state_;}
   bool begin(const char* host,uint16_t port,const char* ca,bool trustedTime,uint32_t timeoutMs) {
+    return beginInternal(host,port,ca,trustedTime,nullptr,timeoutMs);
+  }
+  bool beginBounded(const char* host,uint16_t port,const char* ca,TrustedTimeWindow& window,uint32_t timeoutMs) {
+    TrustedTimeWindow::Bounds bounds{};
+    if(!window.bounds(bounds))return false;
+    return beginInternal(host,port,ca,true,&window,timeoutMs);
+  }
+ private:
+  bool beginInternal(const char* host,uint16_t port,const char* ca,bool trustedTime,TrustedTimeWindow* window,uint32_t timeoutMs) {
     if(state_!=State::Idle || !ca || !trustedTime || !timeoutMs || timeoutMs>30000 ||
        !resolved_.usesTransport(tcp_) || !tls_.usesTransport(tcp_) ||
        resolved_.state()!=ResolvedTcpConnect::State::Idle || tls_.state()!=MbedTlsSession::State::Idle ||
        tcp_.state()!=NonblockingTcp::State::Idle)return false;
     started_=clock_.nowMillis();timeout_=timeoutMs;ca_=ca;
     if(!resolved_.begin(host,port,started_,timeoutMs)){ca_=nullptr;return false;}
-    active_=true;state_=State::Connecting;
+    active_=true;window_=window;state_=State::Connecting;
     if(expired()){finish(State::Timeout);return false;}
     return true;
   }
+ public:
   State poll() {
     if(state_!=State::Connecting && state_!=State::Handshaking)return state_;
     if(expired()){finish(State::Timeout);return state_;}
+    TrustedTimeWindow::Bounds bounds{};
+    if(window_ && !window_->bounds(bounds)){finish(State::Failed);return state_;}
     if(state_==State::Connecting) {
       const auto result=resolved_.poll(clock_.nowMillis());
       if(expired()){finish(State::Timeout);return state_;}
@@ -49,7 +61,7 @@ class VerifiedConnect {
       if(result!=ResolvedTcpConnect::State::Connected)return state_;
       // The caller cannot substitute the resolved numeric address or a second
       // host here: authenticate exactly the host that DNS was asked to resolve.
-      const bool ok=tls_.begin(resolved_.hostname(),ca_,true);
+      const bool ok=window_?tls_.beginBounded(resolved_.hostname(),ca_,*window_):tls_.begin(resolved_.hostname(),ca_,true);
       ca_=nullptr;
       if(expired()){finish(State::Timeout);return state_;}
       if(!ok){finish(State::Failed);return state_;}
@@ -65,8 +77,8 @@ class VerifiedConnect {
   void close(){cleanup();state_=State::Idle;}
  private:
   ConnectionClock& clock_;NonblockingTcp& tcp_;ResolvedTcpConnect& resolved_;MbedTlsSession& tls_;
-  State state_=State::Idle;uint32_t started_=0,timeout_=0;const char* ca_=nullptr;bool active_=false;
+  State state_=State::Idle;uint32_t started_=0,timeout_=0;const char* ca_=nullptr;bool active_=false;TrustedTimeWindow* window_=nullptr;
   bool expired(){return static_cast<uint32_t>(clock_.nowMillis()-started_)>=timeout_;}
-  void cleanup(){if(active_){tls_.reset();resolved_.close();active_=false;}ca_=nullptr;}
+  void cleanup(){if(active_){tls_.reset();resolved_.close();active_=false;}ca_=nullptr;window_=nullptr;}
   void finish(State state){cleanup();state_=state;}
 };

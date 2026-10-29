@@ -2,13 +2,6 @@
 #include "HttpRpcExchange.h"
 #include "VerifiedConnect.h"
 
-// Implemented by the platform only after establishing and maintaining a
-// trustworthy wall clock. Ordinary unauthenticated SNTP is not sufficient.
-class TrustedTime {
- public:
-  virtual ~TrustedTime()=default;
-  virtual bool trusted()=0;
-};
 // Must yield promptly in the network task without resetting Wi-Fi or touching
 // transport/session objects. It must not indefinitely block or stop the clock.
 class NetworkYield {
@@ -24,21 +17,21 @@ class NetworkYield {
 // these deadlines, and HTTPS still requires a full request deadline in caller.
 class MbedTlsChannel final : public VerifiedTlsChannel {
  public:
-  MbedTlsChannel(ConnectionClock& clock,NetworkYield& scheduler,TrustedTime& time,
+  MbedTlsChannel(ConnectionClock& clock,NetworkYield& scheduler,TrustedTimeWindow& time,
                  VerifiedConnect& connection,MbedTlsSession& tls,const char* ca)
    :clock_(clock),scheduler_(scheduler),time_(time),connection_(connection),tls_(tls),ca_(ca) {}
   uint32_t nowMillis() override {return clock_.nowMillis();}
   Connect connectVerified(const char* host,uint16_t port,uint32_t timeoutMs) override {
-    if(!timeoutMs || timeoutMs>30000 || !time_.trusted())return Connect::Error;
+    if(!timeoutMs || timeoutMs>30000 || !timeValid())return Connect::Error;
     const uint32_t start=clock_.nowMillis();
-    if(!connection_.begin(host,port,ca_,true,timeoutMs))
+    if(!connection_.beginBounded(host,port,ca_,time_,timeoutMs))
       return connection_.state()==VerifiedConnect::State::Timeout?Connect::Timeout:Connect::Error;
     for(;;) {
       if(elapsed(start,timeoutMs)){close();return Connect::Timeout;}
-      if(!time_.trusted()){close();return Connect::Error;}
+      if(!timeValid()){close();return Connect::Error;}
       const auto state=connection_.poll();
       if(elapsed(start,timeoutMs)){close();return Connect::Timeout;}
-      if(!time_.trusted()){close();return Connect::Error;}
+      if(!timeValid()){close();return Connect::Error;}
       if(state==VerifiedConnect::State::Verified)return Connect::Ok;
       if(state==VerifiedConnect::State::Timeout){close();return Connect::Timeout;}
       if(state==VerifiedConnect::State::Failed || state==VerifiedConnect::State::Idle){close();return Connect::Error;}
@@ -50,10 +43,10 @@ class MbedTlsChannel final : public VerifiedTlsChannel {
     const uint32_t start=clock_.nowMillis();
     for(;;) {
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!time_.trusted() || connection_.state()!=VerifiedConnect::State::Verified){close();return -1;}
+      if(!timeValid() || connection_.state()!=VerifiedConnect::State::Verified){close();return -1;}
       const auto r=tls_.write(reinterpret_cast<const uint8_t*>(data),length);
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!time_.trusted()){close();return -1;}
+      if(!timeValid()){close();return -1;}
       if(r.status==MbedTlsSession::Status::Progress)return static_cast<int>(r.count);
       if(r.status!=MbedTlsSession::Status::WantIo){close();return -1;}
       scheduler_.yield();
@@ -64,10 +57,10 @@ class MbedTlsChannel final : public VerifiedTlsChannel {
     const uint32_t start=clock_.nowMillis();
     for(;;) {
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!time_.trusted() || connection_.state()!=VerifiedConnect::State::Verified){close();return -1;}
+      if(!timeValid() || connection_.state()!=VerifiedConnect::State::Verified){close();return -1;}
       const auto r=tls_.read(reinterpret_cast<uint8_t*>(data),capacity);
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!time_.trusted()){close();return -1;}
+      if(!timeValid()){close();return -1;}
       if(r.status==MbedTlsSession::Status::Progress)return static_cast<int>(r.count);
       if(r.status==MbedTlsSession::Status::Closed){close();return 0;}
       if(r.status!=MbedTlsSession::Status::WantIo){close();return -1;}
@@ -76,7 +69,8 @@ class MbedTlsChannel final : public VerifiedTlsChannel {
   }
   void close() override {connection_.close();}
  private:
-  ConnectionClock& clock_;NetworkYield& scheduler_;TrustedTime& time_;VerifiedConnect& connection_;
+  ConnectionClock& clock_;NetworkYield& scheduler_;TrustedTimeWindow& time_;VerifiedConnect& connection_;
   MbedTlsSession& tls_;const char* ca_;
+  bool timeValid(){TrustedTimeWindow::Bounds b{};return time_.bounds(b);}
   bool elapsed(uint32_t start,uint32_t limit){return static_cast<uint32_t>(clock_.nowMillis()-start)>=limit;}
 };

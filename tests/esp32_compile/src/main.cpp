@@ -62,18 +62,17 @@ MbedTlsSession tlsSession(rawTcp);
 class FixtureClock : public ConnectionClock {public: uint32_t nowMillis() override {return millis();}};
 FixtureClock fixtureClock;
 VerifiedConnect verifiedConnect(fixtureClock,rawTcp,resolvedTcp,tlsSession);
-class FixtureTrustedTime : public TrustedTime {public: bool trusted() override {return false;}};
 class FixtureNetworkYield : public NetworkYield {public: void yield() override {delay(1);}};
-FixtureTrustedTime fixtureTrustedTime;FixtureNetworkYield fixtureNetworkYield;
-MbedTlsChannel tlsChannel(fixtureClock,fixtureNetworkYield,fixtureTrustedTime,verifiedConnect,tlsSession,"fixture CA");
+FixtureNetworkYield fixtureNetworkYield;
+EspMonotonicMillis monotonicClock;
+TrustedTimeWindow timeWindow(monotonicClock,1000,9999); // fixture only, not a deployed policy
+MbedTlsChannel tlsChannel(fixtureClock,fixtureNetworkYield,timeWindow,verifiedConnect,tlsSession,"fixture CA");
 HttpRpcExchange actualFixtureHttp(tlsChannel,"project123.supabase.co","sb_publishable_test",1000);
 EspWifiStation wifiStation;
 WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
 EspWifiEntropy hardwareEntropy;
 TimeProof timeProof(hardwareEntropy);
 TimeBootstrapExchange timeBootstrap(fixtureClock,fixtureNetworkYield,rawTcp,resolvedTcp,timeProof);
-EspMonotonicMillis monotonicClock;
-TrustedTimeWindow timeWindow(monotonicClock,1000,9999); // fixture only, not a deployed policy
 TimeWindowSynchronizer timeSynchronizer(monotonicClock,timeWindow,timeBootstrap);
 RandomEpochSource hardwareEpochs(hardwareEntropy);
 SyncPlanner* planner = nullptr;

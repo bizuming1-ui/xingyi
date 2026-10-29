@@ -1,5 +1,6 @@
 #pragma once
 #include "NonblockingTcp.h"
+#include "TrustedTimeWindow.h"
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/entropy.h>
@@ -9,9 +10,9 @@
 #include <string.h>
 
 // TLS engine on an already-connected nonblocking TCP stream. Exclusively owned
-// by the network task. This is NOT yet an HttpRpcExchange channel: DNS/TCP,
-// trusted time, a provisioned CA, scheduling and an overall deadline are the
-// caller's responsibility. No application bytes can be written before a
+// by the network task. DNS/TCP, trusted time, a provisioned CA, scheduling and
+// an overall deadline are the caller's responsibility. MbedTlsChannel uses
+// the bounded-time path; the boolean wall-clock path is for isolated fixtures. No application bytes can be written before a
 // successful verified handshake. Cryptographic calls may consume CPU time.
 class MbedTlsSession {
  public:
@@ -31,8 +32,22 @@ class MbedTlsSession {
   // trustworthy wall clock. A plausible clock alone does not prove this.
   bool begin(const char* originalHost,const char* trustedCaPem,bool timeTrusted) {
     if(state_!=State::Idle || tcp_.state()!=NonblockingTcp::State::Connected)return false;
+    window_=nullptr;
     const time_t now=time(nullptr);
-    if(!timeTrusted || now<1704067200 || !validHost(originalHost) || !trustedCaPem)return fail();
+    if(!timeTrusted || now<1704067200)return fail();
+    return setup(originalHost,trustedCaPem);
+  }
+  // Preferred path: verify every certificate for the *entire* authenticated
+  // time interval. The window must outlive this session and remain exclusive.
+  bool beginBounded(const char* originalHost,const char* trustedCaPem,TrustedTimeWindow& window) {
+    if(state_!=State::Idle || tcp_.state()!=NonblockingTcp::State::Connected)return false;
+    TrustedTimeWindow::Bounds bounds{};
+    if(!window.bounds(bounds))return fail();
+    window_=&window;return setup(originalHost,trustedCaPem);
+  }
+ private:
+  bool setup(const char* originalHost,const char* trustedCaPem) {
+    if(!validHost(originalHost) || !trustedCaPem)return fail();
     size_t pemLen=0;while(pemLen<16384 && trustedCaPem[pemLen])++pemLen;
     if(!pemLen || pemLen==16384)return fail();
     // A nonzero parse return can mean only a subset of certificates parsed;
@@ -53,11 +68,13 @@ class MbedTlsSession {
     mbedtls_ssl_set_bio(&ssl_,this,&sendCallback,&recvCallback,nullptr);
     state_=State::Handshaking;return true;
   }
+ public:
   State handshake() {
     if(state_!=State::Handshaking)return state_;
     const int rc=mbedtls_ssl_handshake(&ssl_);
     if(rc==0) {
-      if(!sawLeaf_ || mbedtls_ssl_get_verify_result(&ssl_)!=0){fail();return state_;}
+      TrustedTimeWindow::Bounds bounds{};
+      if(!sawLeaf_ || mbedtls_ssl_get_verify_result(&ssl_)!=0 || (window_ && !window_->bounds(bounds))){fail();return state_;}
       state_=State::Verified;
     } else if(rc!=MBEDTLS_ERR_SSL_WANT_READ && rc!=MBEDTLS_ERR_SSL_WANT_WRITE)fail();
     return state_;
@@ -78,10 +95,10 @@ class MbedTlsSession {
     mbedtls_ctr_drbg_free(&rng_);mbedtls_entropy_free(&entropy_);
     mbedtls_ssl_init(&ssl_);mbedtls_ssl_config_init(&config_);mbedtls_x509_crt_init(&ca_);
     mbedtls_entropy_init(&entropy_);mbedtls_ctr_drbg_init(&rng_);
-    tcp_.close();state_=State::Idle;
+    tcp_.close();window_=nullptr;state_=State::Idle;
   }
  private:
-  NonblockingTcp& tcp_;State state_=State::Idle;bool sawLeaf_=false;
+  NonblockingTcp& tcp_;State state_=State::Idle;bool sawLeaf_=false;TrustedTimeWindow* window_=nullptr;
   mbedtls_ssl_context ssl_;mbedtls_ssl_config config_;mbedtls_x509_crt ca_;
   mbedtls_entropy_context entropy_;mbedtls_ctr_drbg_context rng_;
   bool fail(){tcp_.close();state_=State::Failed;return false;}
@@ -105,18 +122,38 @@ class MbedTlsSession {
     return MBEDTLS_ERR_NET_RECV_FAILED;
   }
   // Called by mbedTLS for each certificate including the trusted root. Never
-  // clear library verification flags. An unavailable/unreasonable clock fails
+  // clear non-date library verification flags. An unavailable clock fails
   // closed. UTC comparison uses certificate fields already parsed by mbedTLS.
   static int verifyDate(void* context,mbedtls_x509_crt* cert,int depth,uint32_t* flags) {
     auto* self=static_cast<MbedTlsSession*>(context);
     if(!cert || !flags || depth<0)return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
     if(depth==0)self->sawLeaf_=true;
-    const time_t now=time(nullptr);struct tm utc{};
-    if(now<1704067200 || !gmtime_r(&now,&utc)) {*flags |= MBEDTLS_X509_BADCERT_NOT_TRUSTED;return 0;}
-    const int current[]={utc.tm_year+1900,utc.tm_mon+1,utc.tm_mday,utc.tm_hour,utc.tm_min,utc.tm_sec};
-    if(compare(cert->valid_from,current)>0)*flags |= MBEDTLS_X509_BADCERT_FUTURE;
-    if(compare(cert->valid_to,current)<0)*flags |= MBEDTLS_X509_BADCERT_EXPIRED;
+    int earliest[6]{},latest[6]{};
+    if(self->window_) {
+      TrustedTimeWindow::Bounds bounds{};
+      if(!self->window_->bounds(bounds) || bounds.latestMs<bounds.earliestMs ||
+         !utcFields(bounds.earliestMs/1000,earliest) ||
+         !utcFields(bounds.latestMs/1000+(bounds.latestMs%1000!=0),latest)) {
+        *flags |= MBEDTLS_X509_BADCERT_NOT_TRUSTED;return 0;
+      }
+      // SDK built-in date flags use the system wall clock, which may be wrong.
+      // Replace ONLY those flags with our authenticated interval checks; all
+      // chain, hostname, signature and other errors remain untouched.
+      *flags &= ~(static_cast<uint32_t>(MBEDTLS_X509_BADCERT_EXPIRED)|static_cast<uint32_t>(MBEDTLS_X509_BADCERT_FUTURE));
+    } else {
+      const time_t now=time(nullptr);
+      if(now<1704067200 || !utcFields(static_cast<uint64_t>(now),earliest)){*flags |= MBEDTLS_X509_BADCERT_NOT_TRUSTED;return 0;}
+      memcpy(latest,earliest,sizeof(earliest));
+    }
+    if(compare(cert->valid_from,earliest)>0)*flags |= MBEDTLS_X509_BADCERT_FUTURE;
+    if(compare(cert->valid_to,latest)<0)*flags |= MBEDTLS_X509_BADCERT_EXPIRED;
     return 0;
+  }
+  static bool utcFields(uint64_t seconds,int out[6]) {
+    const time_t t=static_cast<time_t>(seconds);struct tm utc{};
+    if(t<0 || static_cast<uint64_t>(t)!=seconds || !gmtime_r(&t,&utc))return false;
+    out[0]=utc.tm_year+1900;out[1]=utc.tm_mon+1;out[2]=utc.tm_mday;
+    out[3]=utc.tm_hour;out[4]=utc.tm_min;out[5]=utc.tm_sec;return true;
   }
   static int compare(const mbedtls_x509_time& t,const int current[6]) {
     const int values[]={t.year,t.mon,t.day,t.hour,t.min,t.sec};

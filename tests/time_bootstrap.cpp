@@ -23,13 +23,24 @@ struct MappedOps : TcpOps {
 };
 static std::string file(const char* path){std::ifstream in(path);assert(in);return std::string(std::istreambuf_iterator<char>(in),{});}
 int main(int argc,char** argv){
- assert(argc==4);const auto ca=file(argv[2]),wrongCa=file(argv[3]);
+ assert(argc==4 || argc==5);const auto ca=file(argv[2]),wrongCa=file(argv[3]);
  const char* id="11111111-1111-4111-8111-111111111111";
  const char* secret="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
  Clock clock;Yield scheduler;Entropy entropy;TimeProof proof(entropy);Dns backend;AsyncDns dns(backend);
  MappedOps ops(static_cast<uint16_t>(std::stoi(argv[1])));NonblockingTcp tcp(ops);ResolvedTcpConnect resolved(dns,tcp);
  TimeBootstrapExchange bootstrap(clock,scheduler,tcp,resolved,proof);using R=TimeBootstrapExchange::Result;
  uint64_t seconds=42;
+ if(argc==5) {
+  TrustedTimeWindow window(clock,10000,1000);TimeWindowSynchronizer sync(clock,window,bootstrap);
+  assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000)==R::Ok);
+  MbedTlsSession tls(tcp);VerifiedConnect verified(clock,tcp,resolved,tls);
+  MbedTlsChannel channel(clock,scheduler,window,verified,tls,ca.c_str());
+  HttpRpcExchange exchange(channel,"project123.supabase.co","sb_publishable_test",3000);
+  SyncPlanner::Command cmd{};cmd.kind=SyncPlanner::Kind::Poll;SyncPlanner::Reply reply{};
+  const auto outcome=RpcWorker::execute(exchange,cmd,secret,reply);
+  assert(outcome.result==RpcWorker::Result::Ok && reply.success);
+  std::cout<<"authenticated time bootstrap through fully verified HTTPS RPC passed\n";return 0;
+ }
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::Ok);
  assert(seconds>=1704067200ULL && seconds<=4102444800ULL && tcp.state()==NonblockingTcp::State::Idle && !proof.nonce());
  TrustedTimeWindow window(clock,10000,1000);TimeWindowSynchronizer sync(clock,window,bootstrap);

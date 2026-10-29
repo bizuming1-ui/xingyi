@@ -173,7 +173,11 @@ with tempfile.TemporaryDirectory() as tmp:
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
     try:
-        subprocess.run([str(p / 'test-http'), str(http_port), str(p / 'ca.crt'), str(p / 'wrong.crt')], check=True, timeout=30)
+        certificate = ssl._ssl._test_decode_cert(str(p / 'server.crt'))
+        not_before = int(ssl.cert_time_to_seconds(certificate['notBefore']))
+        not_after = int(ssl.cert_time_to_seconds(certificate['notAfter']))
+        subprocess.run([str(p / 'test-http'), str(http_port), str(p / 'ca.crt'), str(p / 'wrong.crt'),
+                        str(not_before), str(not_after)], check=True, timeout=30)
     finally:
         stop.set()
         listener.close()
@@ -217,11 +221,18 @@ with tempfile.TemporaryDirectory() as tmp:
                         part=conn.recv(4096)
                         if not part: break
                         body+=part
-                    if not header.startswith(b'POST /rest/v1/rpc/device_time_proof HTTP/1.1\r\n'):
-                        raise ValueError('bootstrap endpoint must be fixed')
                     if b'Host: project123.supabase.co' not in header or b'apikey: sb_publishable_test' not in header:
                         raise ValueError('invalid public host or key')
                     payload=json.loads(body)
+                    if header.startswith(b'POST /rest/v1/rpc/device_status HTTP/1.1\r\n'):
+                        if payload.get('p_secret') != fixture_secret:
+                            raise ValueError('normal RPC test credential missing')
+                        reply=b'{"desired_order_id":null,"desired_binding_id":null,"desired_binding_revision":null}'
+                        requests.append({'rpc':'status'})
+                        conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(reply)).encode()+b'\r\n\r\n'+reply)
+                        continue
+                    if not header.startswith(b'POST /rest/v1/rpc/device_time_proof HTTP/1.1\r\n'):
+                        raise ValueError('bootstrap endpoint must be fixed')
                     if set(payload)!={'p_device','p_nonce'} or fixture_secret.encode() in data:
                         raise ValueError('bootstrap must never transmit a secret')
                     requests.append(payload)
@@ -242,6 +253,27 @@ with tempfile.TemporaryDirectory() as tmp:
     try:
         subprocess.run([str(p / 'test-bootstrap'),str(port),str(p / 'ca.crt'),str(p / 'wrong.crt')],check=True,timeout=30)
         assert len(requests)==6, f'unexpected time-only requests: {len(requests)}'
+    finally:
+        stop.set()
+        listener.close()
+        thread.join(timeout=3)
+
+    # Repeat against a valid certificate, then send a normal authenticated RPC
+    # using the newly verified time window and the standard TLS channel.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(p / 'server.crt'), str(p / 'server.key'))
+    listener = socket.socket()
+    listener.bind(('127.0.0.1', 0))
+    listener.listen()
+    listener.settimeout(.1)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+    requests = []
+    thread = threading.Thread(target=time_server,daemon=True)
+    thread.start()
+    try:
+        subprocess.run([str(p / 'test-bootstrap'),str(port),str(p / 'ca.crt'),str(p / 'wrong.crt'),'full'],check=True,timeout=30)
+        assert len(requests)==2 and 'p_nonce' in requests[0] and requests[1]=={'rpc':'status'}
     finally:
         stop.set()
         listener.close()
