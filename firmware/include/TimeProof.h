@@ -31,6 +31,7 @@ class TimeProof {
     nonce_[64]='\0';wipe(bytes,sizeof(bytes));memcpy(device_,deviceId,37);started_=now;pending_=true;return true;
   }
   const char* nonce() const {return pending_?nonce_:nullptr;}
+  const char* deviceId() const {return pending_?device_:nullptr;}
   // Any verification attempt consumes the nonce, even on bad input or timeout.
   // unixSeconds is changed only on success. Actual elapsed time may be close
   // to the cap; the runtime must handle that clock uncertainty conservatively.

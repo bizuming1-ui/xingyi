@@ -21,6 +21,7 @@
 #include "../../../firmware/include/VerifiedConnect.h"
 #include "../../../firmware/include/MbedTlsChannel.h"
 #include "../../../firmware/include/TimeProof.h"
+#include "../../../firmware/include/TimeProofCodec.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -93,8 +94,11 @@ void loop() {
     if(verifiedConnect.begin("project123.supabase.co",443,"fixture CA",false,1000)){(void)verifiedConnect.poll();verifiedConnect.close();}
     wifiSupervisor.step(millis());
     uint64_t signedTime=0;
-    if(timeProof.begin("00000000-0000-4000-8000-000000000001","0000000000000000000000000000000000000000000000000000000000000000",millis()))
-      (void)timeProof.verify("1704067200","0000000000000000000000000000000000000000000000000000000000000000",millis(),signedTime);
+    if(timeProof.begin("00000000-0000-4000-8000-000000000001","0000000000000000000000000000000000000000000000000000000000000000",millis())) {
+      char timeRequest[160]{};(void)TimeProofCodec::request(timeProof,timeRequest,sizeof(timeRequest));
+      const char timeResponse[]="{\"unix_seconds\":\"1704067200\",\"tag\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
+      (void)TimeProofCodec::response(timeProof,timeResponse,sizeof(timeResponse)-1,millis(),signedTime);
+    }
     char randomEpoch[37]{};
     (void)hardwareEpochs.generate(randomEpoch);
     char responseBuffer[32]{};

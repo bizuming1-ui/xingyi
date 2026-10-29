@@ -1,4 +1,4 @@
-#include "../firmware/include/TimeProof.h"
+#include "../firmware/include/TimeProofCodec.h"
 #include <cassert>
 #include <iostream>
 #include <string>
@@ -14,10 +14,13 @@ int main(){
  assert(!proof.begin("invalid",secret.c_str(),0) && !proof.nonce());
  assert(!proof.begin(id.c_str(),"bad",0) && !proof.nonce());
  const uint32_t started=mode=="wrap"?UINT32_MAX-20:100;
- assert(proof.begin(id.c_str(),secret.c_str(),started));std::cout<<proof.nonce()<<std::endl;
- std::string seconds,tag;if(!(std::cin>>seconds>>tag))return 2;
+ assert(proof.begin(id.c_str(),secret.c_str(),started));
+ char tiny[4]{};assert(!TimeProofCodec::request(proof,tiny,sizeof(tiny)) && tiny[0]=='\0');
+ char request[160]{};assert(TimeProofCodec::request(proof,request,sizeof(request)));
+ assert(std::string(request).find(secret)==std::string::npos);std::cout<<request<<std::endl;
+ std::string response;std::cin.ignore(1,'\n');if(!std::getline(std::cin,response))return 2;
  uint64_t value=42;const uint32_t now=mode=="late"?started+5000:mode=="wrap"?15:started+2;
- bool ok=proof.verify(seconds.c_str(),tag.c_str(),now,value);
- assert(!proof.nonce());uint64_t unchanged=42;assert(!proof.verify(seconds.c_str(),tag.c_str(),now,unchanged));assert(unchanged==42);
+ bool ok=TimeProofCodec::response(proof,response.data(),response.size(),now,value);
+ assert(!proof.nonce());uint64_t unchanged=42;assert(!TimeProofCodec::response(proof,response.data(),response.size(),now,unchanged));assert(unchanged==42);
  std::cout<<(ok?"accepted":"rejected")<<" "<<value<<std::endl;
 }

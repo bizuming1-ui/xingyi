@@ -21,16 +21,16 @@ try {
  await assert.rejects(()=>db.query('select secret_hash from public.device_endpoints'),/permission denied/);
  await assert.rejects(()=>db.query('select public.device_time_proof($1,$2)',[id,'bad']),/无效的时间请求/);
  assert.equal((await one('select public.device_time_proof($1,$2) as p',[other,'00'.repeat(32)])).p,null);
- async function check({proofId=id,deviceId=id,deviceSecret=secret,mode='normal',signedNonce=null,alter=(p)=>p,expected='accepted'}={}) {
+ async function check({proofId=id,deviceId=id,deviceSecret=secret,mode='normal',signedNonce=null,alter=(p)=>p,raw=null,expected='accepted'}={}) {
   const child=spawn(join(temp,'driver'),[],{stdio:['pipe','pipe','inherit']});
   const lines=createInterface({input:child.stdout})[Symbol.asyncIterator]();
   const exit=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});
   child.stdin.write(`${deviceSecret} ${deviceId} ${mode}\n`);
-  const first=await lines.next();assert.equal(first.done,false);const nonce=first.value;
+  const first=await lines.next();assert.equal(first.done,false);const request=JSON.parse(first.value);assert.deepEqual(Object.keys(request).sort(),['p_device','p_nonce']);assert.equal(request.p_device,deviceId);const nonce=request.p_nonce;
   assert.equal(nonce,'000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f');
   const signed=(await one('select public.device_time_proof($1,$2) as p',[proofId,signedNonce??nonce])).p;
   assert.match(signed.unix_seconds,/^[0-9]+$/);assert.match(signed.tag,/^[0-9a-f]{64}$/);
-  const response=alter({...signed});child.stdin.end(`${response.unix_seconds} ${response.tag}\n`);
+  const response=alter({...signed});child.stdin.end((raw?raw(response):JSON.stringify(response))+'\n');
   const result=await lines.next();assert.equal(result.done,false);assert.equal(result.value.split(' ')[0],expected);
   if(expected==='accepted')assert.equal(result.value.split(' ')[1],signed.unix_seconds);else assert.equal(result.value.split(' ')[1],'42');
   assert.equal(await exit,0);
@@ -43,5 +43,13 @@ try {
  await check({alter:p=>({...p,unix_seconds:String(Number(p.unix_seconds)+1)}),expected:'rejected'});
  await check({alter:p=>({...p,unix_seconds:'0000000000'}),expected:'rejected'});
  await check({alter:p=>({...p,tag:'a'.repeat(63)+'G'}),expected:'rejected'});
+ await check({raw:p=>JSON.stringify(p)+'{}',expected:'rejected'});
+ await check({raw:p=>JSON.stringify(p)+' '.repeat(300),expected:'rejected'});
+ await check({raw:p=>JSON.stringify(p)+'\u0000',expected:'rejected'});
+ await check({raw:p=>`{"tag":"${p.tag}","tag":"${p.tag}","unix_seconds":"${p.unix_seconds}"}`,expected:'rejected'});
+ await check({raw:p=>JSON.stringify({...p,extra:'0'}),expected:'rejected'});
+ await check({raw:p=>JSON.stringify({...p,unix_seconds:Number(p.unix_seconds)}),expected:'rejected'});
+ await check({raw:p=>JSON.stringify(p).slice(0,-1),expected:'rejected'});
+ await check({raw:p=>JSON.stringify(p).replace('tag','t\\u0061g'),expected:'rejected'});
  console.log('isolated database and firmware authenticated-time proof tests passed (no bootstrap transport)');
 } finally {await db.close();await rm(temp,{recursive:true,force:true});}
