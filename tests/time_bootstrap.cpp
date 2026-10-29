@@ -1,5 +1,6 @@
 #include "../firmware/include/EspTcpOps.h"
 #include "../firmware/include/TimeBootstrapExchange.h"
+#include "../firmware/include/TimeWindowSynchronizer.h"
 #include <cassert>
 #include <chrono>
 #include <fstream>
@@ -7,7 +8,7 @@
 #include <iterator>
 #include <string>
 #include <thread>
-struct Clock : ConnectionClock {std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();uint32_t nowMillis() override {return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count());}};
+struct Clock : ConnectionClock,MonotonicMillis64 {std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();uint32_t nowMillis() override {return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count());} bool read(uint64_t& out) override {out=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count());return true;}};
 struct Yield : NetworkYield {void yield() override {std::this_thread::sleep_for(std::chrono::milliseconds(1));}};
 struct Entropy : SecureEntropy {uint8_t pattern=1;bool fill(uint8_t* b,size_t n) override {for(size_t i=0;i<n;++i)b[i]=static_cast<uint8_t>(pattern+i);return true;}};
 struct Dns : AsyncDnsBackend {int calls=0;bool start(Request* r) override {++calls;const uint8_t ip[]={127,0,0,1};r->complete(r->context,ip);return true;}};
@@ -31,6 +32,12 @@ int main(int argc,char** argv){
  uint64_t seconds=42;
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::Ok);
  assert(seconds>=1704067200ULL && seconds<=4102444800ULL && tcp.state()==NonblockingTcp::State::Idle && !proof.nonce());
+ TrustedTimeWindow window(clock,10000,1000);TimeWindowSynchronizer sync(clock,window,bootstrap);
+ assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000)==R::Ok);
+ TrustedTimeWindow::Bounds bounds{};assert(window.bounds(bounds));
+ assert(bounds.earliestMs>=1704067200000ULL && bounds.latestMs>bounds.earliestMs);
+ assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",3000)==R::InvalidProof);
+ assert(!window.bounds(bounds));
  seconds=42;
  assert(bootstrap.fetch("wrong.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::Unavailable && seconds==42);
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",wrongCa.c_str(),id,secret,3000,seconds)==R::Unavailable && seconds==42);

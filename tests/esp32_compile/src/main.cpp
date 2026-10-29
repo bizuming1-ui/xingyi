@@ -23,6 +23,8 @@
 #include "../../../firmware/include/TimeProof.h"
 #include "../../../firmware/include/TimeProofCodec.h"
 #include "../../../firmware/include/TimeBootstrapExchange.h"
+#include "../../../firmware/include/EspMonotonicMillis.h"
+#include "../../../firmware/include/TimeWindowSynchronizer.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -70,6 +72,9 @@ WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
 EspWifiEntropy hardwareEntropy;
 TimeProof timeProof(hardwareEntropy);
 TimeBootstrapExchange timeBootstrap(fixtureClock,fixtureNetworkYield,rawTcp,resolvedTcp,timeProof);
+EspMonotonicMillis monotonicClock;
+TrustedTimeWindow timeWindow(monotonicClock,1000,9999); // fixture only, not a deployed policy
+TimeWindowSynchronizer timeSynchronizer(monotonicClock,timeWindow,timeBootstrap);
 RandomEpochSource hardwareEpochs(hardwareEntropy);
 SyncPlanner* planner = nullptr;
 volatile uint32_t observed = 0;
@@ -103,6 +108,9 @@ void loop() {
     }
     (void)timeBootstrap.fetch("project123.supabase.co","sb_publishable_test","fixture CA",
       "00000000-0000-4000-8000-000000000001","0000000000000000000000000000000000000000000000000000000000000000",1000,signedTime);
+    (void)timeSynchronizer.refresh("project123.supabase.co","sb_publishable_test","fixture CA",
+      "00000000-0000-4000-8000-000000000001","0000000000000000000000000000000000000000000000000000000000000000",1000);
+    TrustedTimeWindow::Bounds bounds{};(void)timeWindow.bounds(bounds);
     char randomEpoch[37]{};
     (void)hardwareEpochs.generate(randomEpoch);
     char responseBuffer[32]{};

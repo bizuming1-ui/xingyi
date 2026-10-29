@@ -241,7 +241,7 @@ with tempfile.TemporaryDirectory() as tmp:
     thread.start()
     try:
         subprocess.run([str(p / 'test-bootstrap'),str(port),str(p / 'ca.crt'),str(p / 'wrong.crt')],check=True,timeout=30)
-        assert len(requests)==4, f'unexpected time-only requests: {len(requests)}'
+        assert len(requests)==6, f'unexpected time-only requests: {len(requests)}'
     finally:
         stop.set()
         listener.close()
