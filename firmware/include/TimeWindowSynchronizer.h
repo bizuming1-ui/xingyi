@@ -13,6 +13,7 @@ class TimeWindowSynchronizer {
     :clock_(clock),window_(window),bootstrap_(bootstrap) {}
   TimeWindowSynchronizer(const TimeWindowSynchronizer&)=delete;
   TimeWindowSynchronizer& operator=(const TimeWindowSynchronizer&)=delete;
+  bool usesWindow(const TrustedTimeWindow& window) const {return &window_==&window;}
   TimeBootstrapExchange::Result refresh(const char* host,const char* key,const char* ca,
                                        const char* deviceId,const char* secret,uint32_t timeoutMs) {
     window_.invalidate();uint64_t before=0,after=0,seconds=0;

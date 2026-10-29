@@ -47,6 +47,16 @@ class SyncNetworkWorker {
  public:
   SyncNetworkWorker(SyncMailbox& mailbox,RpcExchange& exchange,const char* secret)
     : mailbox_(mailbox),exchange_(exchange),secret_(secret) {}
+  // Flush an already executed result without issuing or discarding an RPC.
+  void flushPending() { if (pending_) publish(); }
+  // When the network is unavailable, report a failed command so the counting
+  // task retains all pending counts and can retry. Preserve any prior result.
+  void failUnavailable() {
+    if (pending_) { publish(); return; }
+    SyncPlanner::Command command{};
+    if (!mailbox_.take(command)) return;
+    completion_={};completion_.ticket=command.ticket;pending_=true;publish();
+  }
   void step() {
     if (pending_) { publish(); return; }
     SyncPlanner::Command command{};

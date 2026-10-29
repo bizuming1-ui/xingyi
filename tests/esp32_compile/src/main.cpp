@@ -26,6 +26,7 @@
 #include "../../../firmware/include/EspMonotonicMillis.h"
 #include "../../../firmware/include/TimeWindowSynchronizer.h"
 #include "../../../firmware/include/FreeRtosRadioLifecycleLock.h"
+#include "../../../firmware/include/AuthenticatedNetworkTime.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -60,7 +61,7 @@ EspAsyncDnsBackend dnsBackend;
 AsyncDns dns(dnsBackend);
 ResolvedTcpConnect resolvedTcp(dns,rawTcp);
 MbedTlsSession tlsSession(rawTcp);
-class FixtureClock : public ConnectionClock {public: uint32_t nowMillis() override {return millis();}};
+class FixtureClock : public ConnectionClock, public NetworkTaskClock {public: uint32_t nowMillis() override {return millis();}};
 FixtureClock fixtureClock;
 VerifiedConnect verifiedConnect(fixtureClock,rawTcp,resolvedTcp,tlsSession);
 class FixtureNetworkYield : public NetworkYield {public: void yield() override {delay(1);}};
@@ -79,6 +80,9 @@ GuardedEntropy networkEntropy(radioLock,hardwareEntropy);
 TimeProof timeProof(networkEntropy);
 TimeBootstrapExchange timeBootstrap(fixtureClock,fixtureNetworkYield,rawTcp,resolvedTcp,timeProof);
 TimeWindowSynchronizer timeSynchronizer(monotonicClock,timeWindow,timeBootstrap);
+AuthenticatedNetworkTime networkTime(timeWindow,timeSynchronizer,"project123.supabase.co","sb_publishable_test","fixture CA",
+  "00000000-0000-4000-8000-000000000001","0000000000000000000000000000000000000000000000000000000000000000",1000);
+NetworkTaskCoordinator networkCoordinator(fixtureClock,guardedWifi,networkTime,networkWorker);
 RandomEpochSource hardwareEpochs(countingEntropy);
 SyncPlanner* planner = nullptr;
 volatile uint32_t observed = 0;
@@ -126,6 +130,7 @@ void loop() {
     (void)actualFixtureHttp.post("device_status","{}",2,responseBuffer,sizeof(responseBuffer));
     controller->step(millis());
     networkWorker.step();
+    networkCoordinator.step();
     (void)counter.bind("00000000-0000-4000-8000-000000000001", 1,
                        "20000000-0000-4000-8000-000000000001",
                        "10000000-0000-4000-8000-000000000001");

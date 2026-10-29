@@ -20,6 +20,7 @@ class GuardedWifiSupervisor {
   GuardedWifiSupervisor(RadioLifecycleLock& lock,WifiSupervisor& supervisor):lock_(lock),supervisor_(supervisor){}
   GuardedWifiSupervisor(const GuardedWifiSupervisor&)=delete;
   GuardedWifiSupervisor& operator=(const GuardedWifiSupervisor&)=delete;
+  WifiSupervisor::State state() const {return supervisor_.state();}
   bool step(uint32_t now) {
     if(!lock_.tryLock())return false;
     struct Release {RadioLifecycleLock& lock;~Release(){lock.unlock();}} release{lock_};

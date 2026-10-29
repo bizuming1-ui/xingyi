@@ -1,6 +1,7 @@
 #include "../firmware/include/EspTcpOps.h"
 #include "../firmware/include/TimeBootstrapExchange.h"
 #include "../firmware/include/TimeWindowSynchronizer.h"
+#include "../firmware/include/AuthenticatedNetworkTime.h"
 #include <cassert>
 #include <chrono>
 #include <fstream>
@@ -8,10 +9,19 @@
 #include <iterator>
 #include <string>
 #include <thread>
-struct Clock : ConnectionClock,MonotonicMillis64 {std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();uint32_t nowMillis() override {return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count());} bool read(uint64_t& out) override {out=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count());return true;}};
+struct Clock : ConnectionClock,MonotonicMillis64,NetworkTaskClock {std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();uint32_t nowMillis() override {return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count());} bool read(uint64_t& out) override {out=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count());return true;}};
 struct Yield : NetworkYield {void yield() override {std::this_thread::sleep_for(std::chrono::milliseconds(1));}};
 struct Entropy : SecureEntropy {uint8_t pattern=1;bool fill(uint8_t* b,size_t n) override {for(size_t i=0;i<n;++i)b[i]=static_cast<uint8_t>(pattern+i);return true;}};
 struct Dns : AsyncDnsBackend {int calls=0;bool start(Request* r) override {++calls;const uint8_t ip[]={127,0,0,1};r->complete(r->context,ip);return true;}};
+struct RadioLock : RadioLifecycleLock {bool held=false;bool tryLock() override{if(held)return false;held=true;return true;}void unlock() override{held=false;}};
+struct Station : WifiStation {bool online=false;bool start(const char*,const char*) override{return true;}bool connected() override{return online;}void disconnect() override{}};
+struct Mailbox : SyncMailbox {
+ SyncPlanner::Command command{};Completion result{};bool hasCommand=false,hasResult=false;
+ bool submit(const SyncPlanner::Command& c) override{if(hasCommand)return false;command=c;hasCommand=true;return true;}
+ bool take(SyncPlanner::Command& c) override{if(!hasCommand)return false;c=command;hasCommand=false;return true;}
+ bool collect(Completion& r) override{if(!hasResult)return false;r=result;hasResult=false;return true;}
+ bool publish(const Completion& r) override{if(hasResult)return false;result=r;hasResult=true;return true;}
+};
 struct MappedOps : TcpOps {
  EspTcpOps ops;uint16_t port;explicit MappedOps(uint16_t p):port(p){}
  int openNonblocking() override {return ops.openNonblocking();}
@@ -32,14 +42,18 @@ int main(int argc,char** argv){
  uint64_t seconds=42;
  if(argc==5) {
   TrustedTimeWindow window(clock,10000,1000);TimeWindowSynchronizer sync(clock,window,bootstrap);
-  assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000)==R::Ok);
   MbedTlsSession tls(tcp);VerifiedConnect verified(clock,tcp,resolved,tls);
   MbedTlsChannel channel(clock,scheduler,window,verified,tls,ca.c_str());
   HttpRpcExchange exchange(channel,"project123.supabase.co","sb_publishable_test",3000);
-  SyncPlanner::Command cmd{};cmd.kind=SyncPlanner::Kind::Poll;SyncPlanner::Reply reply{};
-  const auto outcome=RpcWorker::execute(exchange,cmd,secret,reply);
-  assert(outcome.result==RpcWorker::Result::Ok && reply.success);
-  std::cout<<"authenticated time bootstrap through fully verified HTTPS RPC passed\n";return 0;
+  Mailbox mailbox;SyncNetworkWorker worker(mailbox,exchange,secret);
+  RadioLock lock;Station station;WifiSupervisor supervisor(station,"network","password");GuardedWifiSupervisor wifi(lock,supervisor);
+  AuthenticatedNetworkTime time(window,sync,"project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000);
+  NetworkTaskCoordinator coordinator(clock,wifi,time,worker);
+  SyncPlanner::Command cmd{};cmd.kind=SyncPlanner::Kind::Poll;cmd.ticket=7;assert(mailbox.submit(cmd));
+  coordinator.step();SyncMailbox::Completion result{};assert(mailbox.collect(result) && !result.reply.success);
+  station.online=true;assert(mailbox.submit(cmd));coordinator.step();
+  assert(mailbox.collect(result) && result.ticket==7 && result.reply.success);
+  std::cout<<"network coordinator: authenticated time bootstrap through verified HTTPS RPC passed\n";return 0;
  }
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::Ok);
  assert(seconds>=1704067200ULL && seconds<=4102444800ULL && tcp.state()==NonblockingTcp::State::Idle && !proof.nonce());
