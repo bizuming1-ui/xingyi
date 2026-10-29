@@ -23,6 +23,10 @@ with tempfile.TemporaryDirectory() as tmp:
         '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'),
         str(root / 'tests/mbedtls_session.cpp'), '-L', str(mbed / 'library'),
         '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test'))
+    run('g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread',
+        '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'),
+        str(root / 'tests/verified_connect.cpp'), '-L', str(mbed / 'library'),
+        '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-connect'))
     for name in ('ca', 'wrong'):
         run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
             '-subj', '/CN=Local test CA', '-keyout', str(p / (name + '.key')),
@@ -60,6 +64,8 @@ with tempfile.TemporaryDirectory() as tmp:
             if expired:
                 args.append('expired')
             subprocess.run(args, check=True, timeout=40)
+            if not expired:
+                subprocess.run([str(p / 'test-connect'), str(port), str(p / 'ca.crt')], check=True, timeout=40)
         finally:
             server.terminate()
             try:

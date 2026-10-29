@@ -18,6 +18,7 @@
 #include "../../../firmware/include/EspTcpOps.h"
 #include "../../../firmware/include/ResolvedTcpConnect.h"
 #include "../../../firmware/include/MbedTlsSession.h"
+#include "../../../firmware/include/VerifiedConnect.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -52,6 +53,9 @@ EspAsyncDnsBackend dnsBackend;
 AsyncDns dns(dnsBackend);
 ResolvedTcpConnect resolvedTcp(dns,rawTcp);
 MbedTlsSession tlsSession(rawTcp);
+class FixtureClock : public ConnectionClock {public: uint32_t nowMillis() override {return millis();}};
+FixtureClock fixtureClock;
+VerifiedConnect verifiedConnect(fixtureClock,rawTcp,resolvedTcp,tlsSession);
 EspWifiStation wifiStation;
 WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
 EspWifiEntropy hardwareEntropy;
@@ -78,6 +82,7 @@ void loop() {
     (void)tlsSession.begin("project123.supabase.co","fixture CA",false);
     (void)tlsSession.handshake();
     tlsSession.reset();
+    if(verifiedConnect.begin("project123.supabase.co",443,"fixture CA",false,1000)){(void)verifiedConnect.poll();verifiedConnect.close();}
     wifiSupervisor.step(millis());
     char randomEpoch[37]{};
     (void)hardwareEpochs.generate(randomEpoch);

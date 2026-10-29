@@ -1,7 +1,7 @@
 name: TLS session tests
 on:
   pull_request:
-    paths: ['firmware/**', 'tests/mbedtls_session.cpp', 'tests/run-mbedtls-tests.py', 'tests/mocks/lwip/**', '.github/workflows/mbedtls-tests.yml']
+    paths: ['firmware/**', 'tests/mbedtls_session.cpp', 'tests/verified_connect.cpp', 'tests/run-mbedtls-tests.py', 'tests/mocks/lwip/**', '.github/workflows/mbedtls-tests.yml']
 permissions:
   contents: read
 jobs:

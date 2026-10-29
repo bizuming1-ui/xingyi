@@ -26,6 +26,7 @@ class MbedTlsSession {
   MbedTlsSession(const MbedTlsSession&)=delete;
   MbedTlsSession& operator=(const MbedTlsSession&)=delete;
   State state() const {return state_;}
+  bool usesTransport(const NonblockingTcp& tcp) const {return &tcp_==&tcp;}
   // timeTrusted must only be true after the platform has established a
   // trustworthy wall clock. A plausible clock alone does not prove this.
   bool begin(const char* originalHost,const char* trustedCaPem,bool timeTrusted) {

@@ -16,6 +16,7 @@ class ResolvedTcpConnect {
   ResolvedTcpConnect(const ResolvedTcpConnect&)=delete;
   ResolvedTcpConnect& operator=(const ResolvedTcpConnect&)=delete;
   State state() const {return state_;}
+  bool usesTransport(const NonblockingTcp& tcp) const {return &tcp_==&tcp;}
   // Original hostname, not the resolved address; future TLS must authenticate it.
   const char* hostname() const {return hostname_;}
   bool begin(const char* host,uint16_t port,uint32_t now,uint32_t timeoutMs) {
