@@ -28,5 +28,12 @@ jobs:
       - run: npm ci && npm ci --prefix tests/e2e
       - name: Browser-check public HTML, mobile QR and candidate ZIP
         run: |
-          PUBLIC_EDGE_LIVE=1 node tests/e2e/public-edge-demo.mjs
-          node tests/e2e/public-device-live.mjs
+          for script in public-edge-demo.mjs public-device-live.mjs; do
+            if ! PUBLIC_EDGE_LIVE=1 node "tests/e2e/$script" > /tmp/browser-log 2>&1; then
+              cat /tmp/browser-log
+              message=$(tail -25 /tmp/browser-log | tr '\n' ' ' | cut -c1-1800)
+              echo "::error::$script failed: $message"
+              exit 1
+            fi
+            cat /tmp/browser-log
+          done
