@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h> // Expose dependency to PlatformIO Library Dependency Finder.
 #include <Preferences.h> // Expose dependency to PlatformIO Library Dependency Finder.
+#include <WiFi.h> // Expose Wi-Fi dependency to PlatformIO Library Dependency Finder.
 #include "../../../firmware/include/ButtonCounter.h"
 #include "../../../firmware/include/PreferencesCounterStorage.h"
 #include "../../../firmware/include/SyncPlanner.h"
@@ -10,6 +11,7 @@
 #include "../../../firmware/include/FreeRtosSyncMailbox.h"
 #include "../../../firmware/include/HttpResponseDecoder.h"
 #include "../../../firmware/include/HttpRpcExchange.h"
+#include "../../../firmware/include/EspWifiEntropy.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -37,6 +39,8 @@ FreeRtosSyncMailbox mailbox;
 SyncController* controller = nullptr;
 SyncNetworkWorker networkWorker(mailbox,fixtureExchange,"0000000000000000000000000000000000000000000000000000000000000000");
 FixtureEpochs epochs;
+EspWifiEntropy hardwareEntropy;
+RandomEpochSource hardwareEpochs(hardwareEntropy);
 SyncPlanner* planner = nullptr;
 volatile uint32_t observed = 0;
 volatile bool compileOnlyExercise = false;
@@ -50,6 +54,8 @@ void loop() {
   // Force real ESP32 compilation/linking of the unfinished component API.
   // This branch defaults to false; this project is still not a usable firmware.
   if (compileOnlyExercise && planner && controller) {
+    char randomEpoch[37]{};
+    (void)hardwareEpochs.generate(randomEpoch);
     char responseBuffer[32]{};
     HttpResponseDecoder httpResponse(responseBuffer,sizeof(responseBuffer));
     const char sample[]="HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}";
