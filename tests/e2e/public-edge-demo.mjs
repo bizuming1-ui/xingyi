@@ -26,7 +26,7 @@ try {
   });
   await page.routeWebSocket('**/*',ws=>ws.close());
   await page.addInitScript(s=>localStorage.setItem('sb-xypisxdlxcqyavixdiji-auth-token',JSON.stringify(s)),session);
-  await page.goto(url);await page.getByText('界面1 · 隔离测试').waitFor();
+  const r=await page.goto(url);try{await page.getByText('界面1 · 隔离测试').waitFor({timeout:10000});}catch(e){throw Error(JSON.stringify({status:r.status(),headers:r.headers(),body:await page.locator('body').innerText(),errors}));}
   const img=page.getByAltText('扫描进入隔离测试列表');await img.waitFor();const src=await img.getAttribute('src');
   const png=PNG.sync.read(Buffer.from(src.split(',')[1],'base64'));assert.equal(jsQR(new Uint8ClampedArray(png.data),png.width,png.height)?.data,url);
   await page.getByRole('button',{name:/TEST/}).click();await page.getByAltText('扫描进入隔离测试列表').waitFor();
