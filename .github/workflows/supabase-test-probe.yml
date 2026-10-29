@@ -1,0 +1,25 @@
+name: Isolated Supabase endpoint probe
+on:
+  pull_request:
+    paths: ['.github/workflows/supabase-test-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  endpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify test endpoint TLS and inspect public response headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          host=xypisxdlxcqyavixdiji.supabase.co
+          openssl s_client -connect "$host:443" -servername "$host" -verify_hostname "$host" -verify_return_error -showcerts </dev/null > "$RUNNER_TEMP/chain.txt" 2> "$RUNNER_TEMP/verify.txt"
+          cat "$RUNNER_TEMP/verify.txt"
+          awk '/-----BEGIN CERTIFICATE-----/{n++;p=1} p{print > ("'"$RUNNER_TEMP"'/cert-" n ".pem")} /-----END CERTIFICATE-----/{p=0}' "$RUNNER_TEMP/chain.txt"
+          for cert in "$RUNNER_TEMP"/cert-*.pem; do openssl x509 -in "$cert" -noout -subject -issuer -dates -fingerprint -sha256; done
+          openssl verify -show_chain -verify_hostname "$host" -CAfile /etc/ssl/certs/ca-certificates.crt -untrusted "$RUNNER_TEMP/chain.txt" "$RUNNER_TEMP/cert-1.pem"
+          curl --silent --show-error --max-time 15 --dump-header - --output /dev/null \
+            -H 'apikey: sb_publishable_Wn_srpPJ3lIYOMWwDASRyQ_mqp37Pnc' -H 'Content-Type: application/json' \
+            --data '{"p_device":"00000000-0000-4000-8000-000000000001","p_nonce":"0000000000000000000000000000000000000000000000000000000000000000"}' \
+            "https://$host/rest/v1/rpc/device_time_proof"
