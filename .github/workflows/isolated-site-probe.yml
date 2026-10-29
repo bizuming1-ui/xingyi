@@ -1,6 +1,5 @@
 name: Isolated public test pages
 on:
-  push:
   workflow_dispatch:
 permissions:
   contents: read
