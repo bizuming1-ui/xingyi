@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Local test CA/server only; no production credentials or internet required."""
 import os
+import hashlib
+import hmac
+import json
 from pathlib import Path
 import socket
 import ssl
@@ -36,6 +39,10 @@ with tempfile.TemporaryDirectory() as tmp:
         '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'), '-I', arduino,
         str(root / 'tests/mbedtls_http.cpp'), '-L', str(mbed / 'library'),
         '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-http'))
+    run('g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread',
+        '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'), '-I', arduino,
+        str(root / 'tests/time_bootstrap.cpp'), '-L', str(mbed / 'library'),
+        '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-bootstrap'))
     for name in ('ca', 'wrong'):
         run('openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '2',
             '-subj', '/CN=Local test CA', '-keyout', str(p / (name + '.key')),
@@ -167,6 +174,74 @@ with tempfile.TemporaryDirectory() as tmp:
     thread.start()
     try:
         subprocess.run([str(p / 'test-http'), str(http_port), str(p / 'ca.crt'), str(p / 'wrong.crt')], check=True, timeout=30)
+    finally:
+        stop.set()
+        listener.close()
+        thread.join(timeout=3)
+
+    # Expired test leaf: date exception applies only to this restricted endpoint;
+    # CA and host validation still apply and the signed reply is mandatory.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(p / 'expired.crt'), str(p / 'server.key'))
+    listener = socket.socket()
+    listener.bind(('127.0.0.1', 0))
+    listener.listen()
+    listener.settimeout(.1)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+    requests = []
+    fixture_secret = '0123456789abcdef' * 4
+    key = hashlib.sha256(fixture_secret.encode()).digest()
+    def time_server():
+        while not stop.is_set():
+            try:
+                raw, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                raw.settimeout(3)
+                with context.wrap_socket(raw, server_side=True) as conn:
+                    data = b''
+                    while b'\r\n\r\n' not in data and len(data)<8192:
+                        part=conn.recv(4096)
+                        if not part: break
+                        data += part
+                    header, sep, body = data.partition(b'\r\n\r\n')
+                    sizes=[line.split(b':',1)[1].strip() for line in header.split(b'\r\n')
+                           if line.lower().startswith(b'content-length:')]
+                    if not sep or len(sizes)!=1: continue
+                    count=int(sizes[0])
+                    while len(body)<count:
+                        part=conn.recv(4096)
+                        if not part: break
+                        body+=part
+                    if not header.startswith(b'POST /rest/v1/rpc/device_time_proof HTTP/1.1\r\n'):
+                        raise ValueError('bootstrap endpoint must be fixed')
+                    if b'Host: project123.supabase.co' not in header or b'apikey: sb_publishable_test' not in header:
+                        raise ValueError('invalid public host or key')
+                    payload=json.loads(body)
+                    if set(payload)!={'p_device','p_nonce'} or fixture_secret.encode() in data:
+                        raise ValueError('bootstrap must never transmit a secret')
+                    requests.append(payload)
+                    nonce=payload['p_nonce']
+                    if nonce.startswith('10'):
+                        time.sleep(.5)
+                        continue
+                    epoch=str(int(time.time()))
+                    message=('xingyi-time-v1|'+payload['p_device']+'|'+nonce+'|'+epoch).encode()
+                    tag=hmac.new(key,message,hashlib.sha256).hexdigest()
+                    if nonce.startswith('11'): tag='0'*64
+                    reply=json.dumps({'unix_seconds':epoch,'tag':tag}).encode()
+                    conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: '+str(len(reply)).encode()+b'\r\n\r\n'+reply)
+            except (OSError, ssl.SSLError, ValueError):
+                raw.close()
+    thread=threading.Thread(target=time_server,daemon=True)
+    thread.start()
+    try:
+        subprocess.run([str(p / 'test-bootstrap'),str(port),str(p / 'ca.crt'),str(p / 'wrong.crt')],check=True,timeout=30)
+        assert len(requests)==4, f'unexpected time-only requests: {len(requests)}'
     finally:
         stop.set()
         listener.close()

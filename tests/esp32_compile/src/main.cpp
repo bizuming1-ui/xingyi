@@ -22,6 +22,7 @@
 #include "../../../firmware/include/MbedTlsChannel.h"
 #include "../../../firmware/include/TimeProof.h"
 #include "../../../firmware/include/TimeProofCodec.h"
+#include "../../../firmware/include/TimeBootstrapExchange.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -68,6 +69,7 @@ EspWifiStation wifiStation;
 WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
 EspWifiEntropy hardwareEntropy;
 TimeProof timeProof(hardwareEntropy);
+TimeBootstrapExchange timeBootstrap(fixtureClock,fixtureNetworkYield,rawTcp,resolvedTcp,timeProof);
 RandomEpochSource hardwareEpochs(hardwareEntropy);
 SyncPlanner* planner = nullptr;
 volatile uint32_t observed = 0;
@@ -99,6 +101,8 @@ void loop() {
       const char timeResponse[]="{\"unix_seconds\":\"1704067200\",\"tag\":\"0000000000000000000000000000000000000000000000000000000000000000\"}";
       (void)TimeProofCodec::response(timeProof,timeResponse,sizeof(timeResponse)-1,millis(),signedTime);
     }
+    (void)timeBootstrap.fetch("project123.supabase.co","sb_publishable_test","fixture CA",
+      "00000000-0000-4000-8000-000000000001","0000000000000000000000000000000000000000000000000000000000000000",1000,signedTime);
     char randomEpoch[37]{};
     (void)hardwareEpochs.generate(randomEpoch);
     char responseBuffer[32]{};
