@@ -1,0 +1,47 @@
+import {PGlite} from '@electric-sql/pglite';
+import {pgcrypto} from '@electric-sql/pglite/contrib/pgcrypto';
+import {readFile, mkdtemp, rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {execFileSync, spawn} from 'node:child_process';
+import {createInterface} from 'node:readline';
+import assert from 'node:assert/strict';
+const root=new URL('../../',import.meta.url).pathname;
+const mbed=process.env.MBEDTLS_DIR;if(!mbed)throw Error('MBEDTLS_DIR required');
+const temp=await mkdtemp(join(tmpdir(),'xingyi-time-'));
+const db=await PGlite.create({extensions:{pgcrypto}});
+const id='11111111-1111-4111-8111-111111111111',other='22222222-2222-4222-8222-222222222222',secret='0123456789abcdef'.repeat(4);
+const one=async(sql,args=[]) => (await db.query(sql,args)).rows[0];
+try {
+ execFileSync('g++',['-std=c++17','-Wall','-Wextra','-Werror','-I',join(mbed,'include'),join(root,'tests/time_proof_driver.cpp'),'-L',join(mbed,'library'),'-lmbedcrypto','-o',join(temp,'driver')]);
+ await db.exec('create role anon;create role authenticated;create schema extensions;create extension pgcrypto with schema extensions; create table public.device_endpoints(id uuid primary key,secret_hash bytea not null,revoked_at timestamptz);');
+ await db.exec(await readFile(join(root,'supabase/migrations/202610290004_device_time_proof.sql'),'utf8'));
+ await db.query("insert into public.device_endpoints values($1,extensions.digest($2,'sha256'),null),($3,extensions.digest($2,'sha256'),now())",[id,secret,other]);
+ await db.exec('set role anon');
+ await assert.rejects(()=>db.query('select secret_hash from public.device_endpoints'),/permission denied/);
+ await assert.rejects(()=>db.query('select public.device_time_proof($1,$2)',[id,'bad']),/无效的时间请求/);
+ assert.equal((await one('select public.device_time_proof($1,$2) as p',[other,'00'.repeat(32)])).p,null);
+ async function check({proofId=id,deviceId=id,deviceSecret=secret,mode='normal',signedNonce=null,alter=(p)=>p,expected='accepted'}={}) {
+  const child=spawn(join(temp,'driver'),[],{stdio:['pipe','pipe','inherit']});
+  const lines=createInterface({input:child.stdout})[Symbol.asyncIterator]();
+  const exit=new Promise((resolve,reject)=>{child.once('error',reject);child.once('exit',resolve);});
+  child.stdin.write(`${deviceSecret} ${deviceId} ${mode}\n`);
+  const first=await lines.next();assert.equal(first.done,false);const nonce=first.value;
+  assert.equal(nonce,'000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f');
+  const signed=(await one('select public.device_time_proof($1,$2) as p',[proofId,signedNonce??nonce])).p;
+  assert.match(signed.unix_seconds,/^[0-9]+$/);assert.match(signed.tag,/^[0-9a-f]{64}$/);
+  const response=alter({...signed});child.stdin.end(`${response.unix_seconds} ${response.tag}\n`);
+  const result=await lines.next();assert.equal(result.done,false);assert.equal(result.value.split(' ')[0],expected);
+  if(expected==='accepted')assert.equal(result.value.split(' ')[1],signed.unix_seconds);else assert.equal(result.value.split(' ')[1],'42');
+  assert.equal(await exit,0);
+ }
+ await check();await check({mode:'wrap'});await check({mode:'late',expected:'rejected'});
+ await check({deviceId:'33333333-3333-4333-8333-333333333333',expected:'rejected'});
+ await check({deviceSecret:'f'.repeat(64),expected:'rejected'});
+ await check({signedNonce:'f'.repeat(64),expected:'rejected'});
+ await check({alter:p=>({...p,tag:(p.tag[0]==='a'?'b':'a')+p.tag.slice(1)}),expected:'rejected'});
+ await check({alter:p=>({...p,unix_seconds:String(Number(p.unix_seconds)+1)}),expected:'rejected'});
+ await check({alter:p=>({...p,unix_seconds:'0000000000'}),expected:'rejected'});
+ await check({alter:p=>({...p,tag:'a'.repeat(63)+'G'}),expected:'rejected'});
+ console.log('isolated database and firmware authenticated-time proof tests passed (no bootstrap transport)');
+} finally {await db.close();await rm(temp,{recursive:true,force:true});}

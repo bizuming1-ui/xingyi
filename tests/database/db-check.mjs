@@ -17,6 +17,7 @@ try {
  await db.exec(await readFile(new URL('../../supabase/migrations/202610290001_device_ingest.sql',import.meta.url),'utf8'));
  await db.exec(await readFile(new URL('../../supabase/migrations/202610290002_device_confirmation.sql',import.meta.url),'utf8'));
  await db.exec(await readFile(new URL('../../supabase/migrations/202610290003_device_confirmation_recovery.sql',import.meta.url),'utf8'));
+ await db.exec(await readFile(new URL('../../supabase/migrations/202610290004_device_time_proof.sql',import.meta.url),'utf8'));
  await db.query('insert into auth.users(id) values ($1),($2)',[user,other]);
  await db.query("insert into public.app_settings(id,shared_user_id,admin_password_hash) values(true,$1,extensions.crypt('fixture-admin-pass',extensions.gen_salt('bf')))",[user]);
  await db.query("insert into public.orders(id,order_no,product,total,current_count) values($1,'first','item',100,95),($2,'second','item',100,0)",[first,second]);
@@ -32,9 +33,14 @@ try {
  assert.equal((await one('select public.device_revoke($1,$2) as ok',['fixture-admin-pass',temporary.id])).ok,true);
  await role('anon');
  await assert.rejects(()=>db.query('select public.device_status($1)',[temporary.secret]),/设备认证失败/);
+ assert.equal((await one('select public.device_time_proof($1,$2) as p',[temporary.id,'a'.repeat(64)])).p,null);
  await role('authenticated');
  const created=(await one('select public.device_create($1,$2) as result',['fixture-admin-pass','test'])).result;
  assert.match(created.secret,/^[0-9a-f]{64}$/);
+ await role('anon');
+ const timeProof=(await one('select public.device_time_proof($1,$2) as p',[created.id,'a'.repeat(64)])).p;
+ assert.match(timeProof.unix_seconds,/^[0-9]{10}$/); assert.match(timeProof.tag,/^[0-9a-f]{64}$/);
+ await role('authenticated');
  assert.equal((await one('select count(*) as n from public.device_list()')).n,1);
  assert.equal((await one('select public.device_confirmation_open($1) as result',[created.id])).result,null);
  await assert.rejects(()=>db.query('select public.device_confirmation_open($1)',[first]),/设备不存在/);

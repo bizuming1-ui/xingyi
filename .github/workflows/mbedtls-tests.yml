@@ -1,7 +1,7 @@
 name: TLS session tests
 on:
   pull_request:
-    paths: ['firmware/**', 'tests/mbedtls_session.cpp', 'tests/verified_connect.cpp', 'tests/mbedtls_http.cpp', 'tests/run-mbedtls-tests.py', 'tests/mocks/lwip/**', '.github/workflows/mbedtls-tests.yml']
+    paths: ['firmware/**', 'tests/mbedtls_session.cpp', 'tests/verified_connect.cpp', 'tests/mbedtls_http.cpp', 'tests/time_proof_driver.cpp', 'tests/database/time-proof.mjs', 'tests/database/package*.json', 'supabase/migrations/202610290004_device_time_proof.sql', 'tests/run-mbedtls-tests.py', 'tests/mocks/lwip/**', '.github/workflows/mbedtls-tests.yml']
 permissions:
   contents: read
 jobs:
@@ -30,3 +30,11 @@ jobs:
           sed -i 's/^#define MBEDTLS_HAVE_TIME_DATE$/\/\/ #define MBEDTLS_HAVE_TIME_DATE/' "$RUNNER_TEMP/mbedtls-no-date/include/mbedtls/config.h"
           make -C "$RUNNER_TEMP/mbedtls-no-date/library" -j2
           MBEDTLS_DIR="$RUNNER_TEMP/mbedtls-no-date" ARDUINOJSON_INCLUDE="$RUNNER_TEMP/ArduinoJson-6.21.5/src" python3 tests/run-mbedtls-tests.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test isolated database and firmware time proof
+        run: |
+          npm ci --prefix tests/database
+          MBEDTLS_DIR="$RUNNER_TEMP/mbedtls-no-date" node tests/database/time-proof.mjs

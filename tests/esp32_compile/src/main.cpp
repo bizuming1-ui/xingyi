@@ -20,6 +20,7 @@
 #include "../../../firmware/include/MbedTlsSession.h"
 #include "../../../firmware/include/VerifiedConnect.h"
 #include "../../../firmware/include/MbedTlsChannel.h"
+#include "../../../firmware/include/TimeProof.h"
 
 ButtonCounter button;
 PreferencesCounterStorage storage;
@@ -65,6 +66,7 @@ HttpRpcExchange actualFixtureHttp(tlsChannel,"project123.supabase.co","sb_publis
 EspWifiStation wifiStation;
 WifiSupervisor wifiSupervisor(wifiStation,"fixture-network","fixture-password");
 EspWifiEntropy hardwareEntropy;
+TimeProof timeProof(hardwareEntropy);
 RandomEpochSource hardwareEpochs(hardwareEntropy);
 SyncPlanner* planner = nullptr;
 volatile uint32_t observed = 0;
@@ -90,6 +92,9 @@ void loop() {
     tlsSession.reset();
     if(verifiedConnect.begin("project123.supabase.co",443,"fixture CA",false,1000)){(void)verifiedConnect.poll();verifiedConnect.close();}
     wifiSupervisor.step(millis());
+    uint64_t signedTime=0;
+    if(timeProof.begin("00000000-0000-4000-8000-000000000001","0000000000000000000000000000000000000000000000000000000000000000",millis()))
+      (void)timeProof.verify("1704067200","0000000000000000000000000000000000000000000000000000000000000000",millis(),signedTime);
     char randomEpoch[37]{};
     (void)hardwareEpochs.generate(randomEpoch);
     char responseBuffer[32]{};
