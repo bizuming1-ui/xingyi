@@ -17,6 +17,7 @@ try {
   await page.route('**/*',async route=>{
    const req=route.request(),u=new URL(req.url());if(u.origin!==origin)return route.abort();
    const headers={'content-type':'application/json'};
+   if(u.pathname==='/functions/v1/demo1/' && process.env.PUBLIC_EDGE_LIVE==='1')return route.continue();
    if(u.pathname==='/functions/v1/demo1/')return route.fulfill({status:200,headers:{'content-type':'text/html; charset=utf-8','content-security-policy':"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' wss://xypisxdlxcqyavixdiji.supabase.co; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"},body:html});
    if(u.pathname==='/auth/v1/user')return route.fulfill({status:200,headers,body:JSON.stringify(session.user)});
    if(u.pathname==='/rest/v1/rpc/is_operator')return route.fulfill({status:200,headers,body:'true'});

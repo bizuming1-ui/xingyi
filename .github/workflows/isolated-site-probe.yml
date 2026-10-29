@@ -20,3 +20,13 @@ jobs:
           done
           echo '0b61902c0b9d04236299a9b8401068896d90e994677ed4ea386f18c3bd93d986  demo1.html' | sha256sum -c -
           echo '62694294bd254cd3873df17e77e5b246c2f29aa3f923541d39bbdcb73e205708  demo2.html' | sha256sum -c -
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci && npm ci --prefix tests/e2e
+      - name: Browser-check public HTML, mobile QR and candidate ZIP
+        run: |
+          PUBLIC_EDGE_LIVE=1 node tests/e2e/public-edge-demo.mjs
+          node tests/e2e/public-device-live.mjs
