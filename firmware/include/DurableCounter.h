@@ -111,6 +111,7 @@ class DurableCounter {
     return persist(next);
   }
 
+  bool isLoaded() const { return loaded_; }
   bool isReady() const { return loaded_ && isBound(); }
   bool isFrozen() const { return state_.barrierId[0] != '\0'; }
   bool canUpload() const { return isReady() && !isFrozen(); }
