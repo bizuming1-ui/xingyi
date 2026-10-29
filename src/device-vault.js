@@ -36,3 +36,51 @@ export class DeviceVault {
   return decryptDeviceSecret(id,data.envelope,password);
  }
 }
+
+// A non-secret request receipt is persisted BEFORE sending the mutation. It
+// blocks another rotation after a lost response, even across reloads/tabs.
+const markerKey=id=>'xingyi-test-rotation-pending:'+id;
+export function pendingRotation(id,storage=globalThis.localStorage){
+ if(!uuid(id)||!storage)throw Error('本机安全存储不可用，不能更换密钥。');
+ let value;try{value=storage.getItem(markerKey(id));}catch{throw Error('本机安全存储不可用，不能更换密钥。');}
+ if(value===null)return null;
+ if(!uuid(value))throw Error('更换记录异常，不能继续操作。');return value;
+}
+function clearReceipt(id,request,storage){
+ try{if(storage.getItem(markerKey(id))===request)storage.removeItem(markerKey(id));}catch{/* leaving the receipt blocks further mutation */}
+}
+export async function rotateDeviceSecret(db,id,password,{storage=globalThis.localStorage,locks=globalThis.navigator?.locks}={}) {
+ if(!uuid(id)||!password)throw Error('请输入管理员密码。');
+ if(!locks?.request)throw Error('浏览器不支持安全的跨标签页锁，不能更换密钥。');
+ return locks.request('xingyi-test-rotate:'+id,{mode:'exclusive'},async()=>{
+  if(pendingRotation(id,storage))throw Error('上次更换结果未确认，请先核查更换结果。');
+  const info=await db.rpc('test_device_rotation_revision',{p_password:password,p_device:id});
+  if(info.error)throw Error('未能读取设备状态，尚未更换密钥。');
+  if(info.data===null)throw Error('管理员密码错误或暂时锁定，尚未更换密钥。');
+  if(info.data?.status!=='ready'||!Number.isSafeInteger(info.data.revision)||info.data.revision<0)throw Error('设备不存在或状态无效，尚未更换密钥。');
+  const secret=Array.from(crypto.getRandomValues(new Uint8Array(32)),b=>b.toString(16).padStart(2,'0')).join('');
+  const envelope=await encryptDeviceSecret(id,secret,password);
+  if(await decryptDeviceSecret(id,envelope,password)!==secret)throw Error('加密验证失败，尚未更换密钥。');
+  const {requestId}=await import('./request-id.js');const request=requestId();
+  try{storage.setItem(markerKey(id),request);if(storage.getItem(markerKey(id))!==request)throw Error();}catch{throw Error('本机安全存储不可用，尚未更换密钥。');}
+  const req={p_password:password,p_device:id,p_secret:secret,p_envelope:envelope,p_revision:info.data.revision,p_request:request};
+  let result;try{result=await db.rpc('test_device_rotate',req);}catch{return {status:'unknown'};}
+  if(!result||result.error)return {status:'unknown'};
+  if(result.data===null){clearReceipt(id,request,storage);return {status:'denied'};}
+  if(result.data?.status==='conflict'||result.data?.status==='missing'){clearReceipt(id,request,storage);return {status:'conflict'};}
+  if(result.data?.status!=='committed'||result.data.revision!==info.data.revision+1)return {status:'unknown'};
+  clearReceipt(id,request,storage);return {status:'committed',secret};
+ });
+}
+export async function resolveDeviceRotation(db,id,password,{storage=globalThis.localStorage,locks=globalThis.navigator?.locks}={}) {
+ if(!uuid(id)||!password)throw Error('请输入管理员密码。');
+ if(!locks?.request)throw Error('浏览器不支持安全的跨标签页锁，不能核查。');
+ return locks.request('xingyi-test-rotate:'+id,{mode:'exclusive'},async()=>{
+  const request=pendingRotation(id,storage);if(!request)throw Error('本机没有待核查的更换记录。');
+  const {data,error}=await db.rpc('test_device_rotation_result',{p_password:password,p_device:id,p_request:request});
+  if(error)throw Error('无法核查，请检查网络。');if(data===null)throw Error('管理员密码错误或暂时锁定。');
+  if(data?.status!=='committed')throw Error('更换尚未确认或已被其他操作替代，请勿继续更换或烧录，请联系管理员核查。');
+  const secret=await new DeviceVault(db).unlock(id,password);if(!secret)throw Error('未找到密钥备份，请联系管理员核查。');
+  clearReceipt(id,request,storage);return secret;
+ });
+}

@@ -1,0 +1,32 @@
+import {PGlite} from '@electric-sql/pglite';import {pgcrypto} from '@electric-sql/pglite/contrib/pgcrypto';import {readFile} from 'node:fs/promises';import assert from 'node:assert/strict';
+const db=await PGlite.create({extensions:{pgcrypto}}),user='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',order='11111111-1111-4111-8111-111111111111',epoch='e0000000-0000-4000-8000-000000000001';
+try{
+ await db.exec(`create role anon;create role authenticated;create schema auth;create schema extensions;create table auth.users(id uuid primary key);create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;create publication supabase_realtime;`);
+ for(const path of ['../../supabase/schema.sql','../../supabase/migrations/202610290001_device_ingest.sql','../../supabase/migrations/202610290004_device_time_proof.sql','../../supabase/test-only/device_vault.sql','../../supabase/test-only/device_rotation.sql'])await db.exec(await readFile(new URL(path,import.meta.url),'utf8'));
+ await db.query('insert into auth.users values($1)',[user]);await db.query("insert into public.app_settings(id,shared_user_id,admin_password_hash) values(true,$1,extensions.crypt('fixture-admin',extensions.gen_salt('bf')))",[user]);
+ await db.query("insert into public.orders(id,order_no,product,total,current_count) values($1,'fixture','item',100,0)",[order]);await db.query("select set_config('request.jwt.claim.sub',$1,false)",[user]);await db.exec('set role authenticated');
+ const one=async(sql,args=[]) => (await db.query(sql,args)).rows[0].x;
+ const dev=await one('select public.device_create($1,$2) x',['fixture-admin','test']),binding=await one('select public.device_request_binding($1,$2) x',[dev.id,order]);
+ await db.exec('reset role;set role anon');assert.equal((await one('select public.device_ingest($1,$2,$3,$4) x',[dev.secret,binding,epoch,3])).accepted_total,3);
+ const oldProof=await one('select public.device_time_proof($1,$2) x',[dev.id,'a'.repeat(64)]);
+ await db.exec('reset role;set role authenticated');
+ const envelope={version:1,salt:'A'.repeat(22)+'==',iv:'A'.repeat(16),ciphertext:'A'.repeat(107)+'='},next='b'.repeat(64),request='c0000000-0000-4000-8000-000000000001';
+ const rotate=(password,secret=next,revision=0,id=request,env=envelope)=>one('select public.test_device_rotate($1,$2,$3,$4,$5,$6) x',[password,dev.id,secret,env,revision,id]);
+ assert.equal(await rotate('wrong'),null);assert.equal((await one('select public.test_device_rotation_revision($1,$2) x',['fixture-admin',dev.id])).revision,0);
+ await assert.rejects(()=>rotate('fixture-admin',next,0,request,{...envelope,iv:'bad'}),/invalid envelope/);
+ assert.equal((await one('select public.test_device_rotation_result($1,$2,$3) x',['fixture-admin',dev.id,request])).status,'unknown');
+ assert.equal((await rotate('fixture-admin')).status,'committed');assert.equal((await rotate('fixture-admin')).status,'committed');
+ assert.equal((await one('select public.test_device_rotation_result($1,$2,$3) x',['fixture-admin',dev.id,request])).status,'committed');
+ assert.equal((await rotate('fixture-admin','c'.repeat(64),0,request)).status,'conflict');
+ assert.equal((await rotate('fixture-admin','c'.repeat(64),0,'c0000000-0000-4000-8000-000000000002')).status,'conflict');
+ assert.deepEqual(await one('select public.test_device_vault_read($1,$2) x',['fixture-admin',dev.id]),{state:'saved',envelope});
+ assert.equal(await one('select desired_binding_id x from public.device_list()'),binding);
+ await db.exec('reset role;set role anon');
+ await assert.rejects(()=>one('select public.device_status($1) x',[dev.secret]),/设备认证失败/);
+ assert.equal((await one('select public.device_status($1) x',[next])).desired_binding_id,binding);
+ assert.notEqual((await one('select public.device_time_proof($1,$2) x',[dev.id,'a'.repeat(64)])).tag,oldProof.tag);
+ assert.equal((await one('select public.device_ingest($1,$2,$3,$4) x',[next,binding,epoch,5])).accepted_total,5);
+ await assert.rejects(()=>one('select public.test_device_rotate($1,$2,$3,$4,$5,$6) x',['fixture-admin',dev.id,next,envelope,1,request]),/permission denied/);
+ await db.exec('reset role');assert.equal((await one('select count x from public.device_order_drafts where order_id=$1',[order])),5);
+ console.log('test device credential rotation: auth, idempotency, conflict, binding and delayed counts passed');
+}finally{await db.close();}

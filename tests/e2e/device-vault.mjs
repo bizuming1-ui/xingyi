@@ -7,8 +7,8 @@ const session={access_token:`eyJhbGciOiJub25lIn0.${payload}.signature`,refresh_t
 const order='d0000000-0000-4000-8000-000000000001',device='e0000000-0000-4000-8000-000000000001',secret='a'.repeat(64),password='fixture-admin';
 const browser=await chromium.launch({executablePath:await chromiumBinary.executablePath(),args:chromiumBinary.args.filter(x=>x!=='--single-process'),headless:true});
 try{
- for(const size of [{width:390,height:844},{width:320,height:568},{width:568,height:320},{width:1280,height:720}]) {
-  const context=await browser.newContext({viewport:size,isMobile:true,hasTouch:true});const page=await context.newPage();let envelope=null;
+ for(const {size,lost} of [{size:{width:390,height:844}},{size:{width:320,height:568}},{size:{width:568,height:320}},{size:{width:1280,height:720}},{size:{width:390,height:844},lost:true}]) {
+  const context=await browser.newContext({viewport:size,isMobile:true,hasTouch:true});const page=await context.newPage();let envelope=null,rotated=null;
   await page.route('**/*',r=>(['127.0.0.1','localhost'].includes(new URL(r.request().url()).hostname)||(live&&r.request().url()===origin))?r.continue():r.abort());await page.routeWebSocket('**/*',ws=>ws.close());
   await page.route(api,async route=>{
    const req=route.request(),path=new URL(req.url()).pathname,headers={'access-control-allow-origin':'*','content-type':'application/json'};
@@ -20,13 +20,16 @@ try{
    else if(path==='/rest/v1/rpc/device_list')body=[{id:device,label:'ESP32-S3',desired_binding_id:null,desired_order_id:null,desired_binding_revision:null}];
    else if(path==='/rest/v1/device_order_drafts')body=null;
    else if(path==='/rest/v1/rpc/test_device_vault_save'){const p=req.postDataJSON();assert.equal(p.p_password,password);assert.equal(p.p_secret,secret);assert.equal(p.p_device,device);envelope=p.p_envelope;assert.ok(!JSON.stringify(envelope).includes(secret));body=true;}
+   else if(path==='/rest/v1/rpc/test_device_rotation_revision'){body={status:'ready',revision:0};}
+   else if(path==='/rest/v1/rpc/test_device_rotate'){const p=req.postDataJSON();assert.equal(p.p_password,password);assert.equal(p.p_device,device);assert.match(p.p_secret,/^[0-9a-f]{64}$/);assert.ok(!JSON.stringify(p.p_envelope).includes(p.p_secret));rotated=p.p_secret;envelope=p.p_envelope;if(lost)return route.fulfill({status:503,headers,body:'{}'});body={status:'committed',revision:1};}
+   else if(path==='/rest/v1/rpc/test_device_rotation_result'){body={status:'committed',revision:1};}
    else if(path==='/rest/v1/rpc/test_device_vault_read'){const p=req.postDataJSON();body=p.p_password===password?(envelope?{state:'saved',envelope}:{state:'missing'}):null;}
    else throw Error(`unexpected request ${path}`);
    return route.fulfill({status:200,headers,body:JSON.stringify(body)});
   });
   await page.addInitScript(({s,live})=>localStorage.setItem(live?'sb-xypisxdlxcqyavixdiji-auth-token':'sb-example-auth-token',JSON.stringify(s)),{s:session,live});
   await page.goto(origin);await page.getByRole('button',{name:/TEST/}).click();await page.getByRole('button',{name:'设备预览'}).click();
-  await page.getByRole('button',{name:'设备 ID / 密钥'}).click();assert.equal(await page.getByLabel('设备 ID').inputValue(),device);
+  await page.getByRole('button',{name:'设备 ID / 密钥'}).click();assert.equal(await page.getByLabel('设备 ID').inputValue(),device);const menuMetrics=await page.evaluate(()=>({h:document.documentElement.scrollHeight,w:document.documentElement.scrollWidth,ih:innerHeight,iw:innerWidth}));assert.ok(menuMetrics.h<=menuMetrics.ih+1&&menuMetrics.w<=menuMetrics.iw+1,JSON.stringify({size,menuMetrics}));
   await page.getByRole('button',{name:'保存现有密钥'}).click();await page.getByLabel('现有设备密钥').fill(secret);await page.getByLabel('管理员密码').fill(password);await page.getByRole('button',{name:'加密并保存'}).click();
   await page.getByText('已加密保存。',{exact:false}).waitFor();
   await page.getByRole('button',{name:'找回密钥'}).click();await page.getByLabel('管理员密码').fill('wrong');await page.getByRole('button',{name:'解锁'}).click();await page.getByText('管理员密码错误或暂时锁定。').waitFor();
@@ -34,7 +37,17 @@ try{
   assert.equal(await page.getByLabel('设备密钥',{exact:true}).inputValue(),secret);assert.equal(await page.getByLabel('设备密钥',{exact:true}).getAttribute('type'),'password');
   assert.equal(await page.evaluate(s=>JSON.stringify({...localStorage,...sessionStorage}).includes(s),secret),false);
   const metrics=await page.evaluate(()=>({h:document.documentElement.scrollHeight,w:document.documentElement.scrollWidth,ih:innerHeight,iw:innerWidth}));assert.ok(metrics.h<=metrics.ih+1&&metrics.w<=metrics.iw+1,JSON.stringify({size,metrics}));
-  await page.getByRole('button',{name:'← 返回设备凭据'}).click();assert.equal(await page.getByLabel('设备密钥',{exact:true}).count(),0);await context.close();
+  await page.getByRole('button',{name:'← 返回设备凭据'}).click();assert.equal(await page.getByLabel('设备密钥',{exact:true}).count(),0);
+  await page.getByRole('button',{name:'自动生成并更换密钥'}).click();const formMetrics=await page.evaluate(()=>({h:document.documentElement.scrollHeight,w:document.documentElement.scrollWidth,ih:innerHeight,iw:innerWidth}));assert.ok(formMetrics.h<=formMetrics.ih+1&&formMetrics.w<=formMetrics.iw+1,JSON.stringify({size,formMetrics}));assert.equal(await page.getByRole('button',{name:'确认更换'}).isDisabled(),true);
+  await page.getByLabel('我已暂停按键，并准备更新开发板').check();await page.getByLabel('管理员密码').fill(password);await page.getByRole('button',{name:'确认更换'}).click();
+  if(lost){
+   await page.getByText('更换结果未知：',{exact:false}).waitFor();await page.reload();
+   await page.getByRole('button',{name:/TEST/}).click();await page.getByRole('button',{name:'设备预览'}).click();await page.getByRole('button',{name:'设备 ID / 密钥'}).click();
+   await page.getByRole('button',{name:'核查更换结果'}).click();await page.getByLabel('管理员密码').fill(password);await page.getByRole('button',{name:'核查',exact:true}).click();await page.getByText('已核实更换成功',{exact:false}).waitFor();
+  } else await page.getByText('新密钥已生效并加密保存。',{exact:false}).waitFor();
+  assert.equal(await page.getByLabel('设备密钥',{exact:true}).inputValue(),rotated);
+  const rotateMetrics=await page.evaluate(()=>({h:document.documentElement.scrollHeight,w:document.documentElement.scrollWidth,ih:innerHeight,iw:innerWidth}));assert.ok(rotateMetrics.h<=rotateMetrics.ih+1&&rotateMetrics.w<=rotateMetrics.iw+1,JSON.stringify({size,rotateMetrics}));
+  await context.close();
  }
  console.log('device vault UI save/unlock and mobile regression passed');
 }finally{await browser.close();}

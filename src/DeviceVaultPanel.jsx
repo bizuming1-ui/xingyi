@@ -1,15 +1,22 @@
 import React,{useMemo,useState} from 'react';
-import {DeviceVault} from './device-vault.js';
+import {DeviceVault,rotateDeviceSecret,resolveDeviceRotation,pendingRotation} from './device-vault.js';
 
 // Never persist or log plaintext, credentials, or admin password in the browser.
 export function DeviceVaultPanel({db,deviceId,onBack}) {
  const vault=useMemo(()=>new DeviceVault(db),[db]);
- const [mode,setMode]=useState('menu'),[admin,setAdmin]=useState(''),[input,setInput]=useState(''),[secret,setSecret]=useState(null),[shown,setShown]=useState(false),[busy,setBusy]=useState(false),[message,setMessage]=useState('');
- function choose(next){setAdmin('');setInput('');setSecret(null);setShown(false);setMessage('');setMode(next)}
+ const [mode,setMode]=useState('menu'),[admin,setAdmin]=useState(''),[input,setInput]=useState(''),[secret,setSecret]=useState(null),[shown,setShown]=useState(false),[busy,setBusy]=useState(false),[pause,setPause]=useState(false),[rotationUncertain,setRotationUncertain]=useState(()=>{try{return !!pendingRotation(deviceId)}catch{return true}}),[message,setMessage]=useState('');
+ function choose(next){setAdmin('');setInput('');setSecret(null);setShown(false);setPause(false);setMessage('');setMode(next)}
  async function submit(e){
   e.preventDefault();if(busy)return;const password=admin,current=input;setAdmin('');setInput('');setMessage('');setBusy(true);
   try{
-   if(mode==='save'){
+   if(mode==='resolve'){const value=await resolveDeviceRotation(db,deviceId,password);setSecret(value);setShown(false);setRotationUncertain(false);setMode('result');setMessage('已核实更换成功，旧密钥已失效。请保留 NVS 并更新开发板。');
+   } else if(mode==='rotate'){
+    const result=await rotateDeviceSecret(db,deviceId,password);
+    if(result.status==='committed'){setSecret(result.secret);setShown(false);setMode('result');setMessage('新密钥已生效并加密保存。旧固件将无法联网；请保留 NVS 并重新烧录。');}
+    else if(result.status==='unknown'){setRotationUncertain(true);setMode('menu');setMessage('更换结果未知：不要再次更换或烧录。请先联系管理员核查状态；密钥若已生效，可用找回密钥查看备份。');}
+    else if(result.status==='denied')setMessage('管理员密码错误或暂时锁定，未更换密钥。');
+    else setMessage('设备状态已变化或已停用，请返回核查，未更换密钥。');
+   } else if(mode==='save'){
     await vault.save(deviceId,current,password);
     setMode('menu');setMessage('已加密保存。请用“找回密钥”检查备份是否能解锁。');
    } else {
@@ -26,11 +33,12 @@ export function DeviceVaultPanel({db,deviceId,onBack}) {
   <h1>设备凭据 <small>隔离测试</small></h1>
   <div className="vault-content">
    <label className="vault-field">设备 ID<input aria-label="设备 ID" readOnly value={deviceId}/></label>
-   {mode==='menu'&&<><button onClick={()=>copy(deviceId)}>复制设备 ID</button><div className="vault-buttons"><button onClick={()=>choose('unlock')}>找回密钥</button><button onClick={()=>choose('save')}>保存现有密钥</button></div><p>密钥加密后保存到测试数据库，使用现有管理员密码解锁。首次使用需从本机配置导入。</p></>}
-   {(mode==='save'||mode==='unlock')&&<form onSubmit={submit}>
+   {mode==='menu'&&<><button onClick={()=>copy(deviceId)}>复制设备 ID</button><div className="vault-buttons"><button onClick={()=>choose('unlock')}>找回密钥</button><button onClick={()=>choose('save')}>保存现有密钥</button></div>{rotationUncertain?<button onClick={()=>choose('resolve')}>核查更换结果</button>:<button onClick={()=>choose('rotate')}>自动生成并更换密钥</button>}<p>密钥加密后保存到测试数据库，使用现有管理员密码解锁。首次使用需从本机配置导入。</p></>}
+   {(mode==='save'||mode==='unlock'||mode==='rotate'||mode==='resolve')&&<form onSubmit={submit}>
     {mode==='save'&&<label className="vault-field">现有设备密钥<input type="password" autoComplete="off" spellCheck="false" required value={input} onChange={e=>setInput(e.target.value)} /></label>}
+    {mode==='rotate'&&<><p>更换后旧密钥立即失效，开发板需用新密钥重新烧录。未同步数仍依赖板上 NVS，切勿擦除；无法保证断电或损坏时可恢复。</p><label className="vault-confirm"><input type="checkbox" checked={pause} onChange={e=>setPause(e.target.checked)} />我已暂停按键，并准备更新开发板</label></>}
     <label className="vault-field">管理员密码<input type="password" autoComplete="off" required value={admin} onChange={e=>setAdmin(e.target.value)} /></label>
-    <button disabled={busy}>{busy?'处理中…':mode==='save'?'加密并保存':'解锁'}</button>
+    <button disabled={busy||(mode==='rotate'&&!pause)}>{busy?'处理中…':mode==='save'?'加密并保存':mode==='rotate'?'确认更换':mode==='resolve'?'核查':'解锁'}</button>
    </form>}
    {mode==='result'&&<><label className="vault-field">设备密钥<input aria-label="设备密钥" readOnly type={shown?'text':'password'} value={secret||''}/></label><div className="vault-buttons"><button onClick={()=>setShown(!shown)}>{shown?'隐藏密钥':'显示密钥'}</button><button onClick={()=>copy(secret)}>复制密钥</button></div></>}
    {message&&<p role="status" className="vault-message">{message}</p>}

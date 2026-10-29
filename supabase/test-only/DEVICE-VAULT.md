@@ -33,3 +33,24 @@ backup, and do not put credentials into chat, screenshots, or Git.
 This migration is limited to the isolated test project. Production deployment,
 key rotation, secret logging policy, security review, password migration, and
 real device/browser verification remain outstanding.
+
+## Existing-device key rotation (test only)
+
+The administrator can generate a new secret in the browser. The RPC atomically
+updates the existing device hash and its encrypted vault envelope while keeping
+the same device ID, requested binding and counter streams. An optimistic
+revision and request ID prevent duplicate/stale mutations. A non-secret
+request receipt is stored before mutation, and a browser Web Lock serializes
+same-browser tabs; a lost response blocks further rotation until the request is
+confirmed and the backup unlocked. If the receipt is missing or operation was
+never committed, recovery still requires manual investigation. A different
+browser, cleared storage, or an administrator changing the password complicates
+recovery. Do not retry uncertain changes or rely on this receipt as a backup.
+
+Rotation stops the existing board authenticating until re-flashed with the new
+secret. Pending counts remain dependent on the board's own NVS and compatible
+firmware, so do not erase NVS and do not claim recovery is guaranteed. The
+old credential can potentially finish a request already in flight during
+rotation. This design has only been exercised in database and mock browser
+tests, not with a physical board. Rotate only after the operator pauses presses
+and understands that service interruption and loss remain possible.
