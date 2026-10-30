@@ -60,6 +60,7 @@ class SyncNetworkWorker {
     : mailbox_(mailbox),exchange_(exchange),secret_(secret),observer_(observer) {}
   SyncPlanner::Kind lastKind() const {return lastKind_;}
   RpcWorker::Outcome lastOutcome() const {return lastOutcome_;}
+  bool barrierActive() const {return barrierActive_;}
   void closeConnection() {exchange_.close();}
   // Flush an already executed result without issuing or discarding an RPC.
   void flushPending() { if (pending_) publish(); }
@@ -69,6 +70,7 @@ class SyncNetworkWorker {
     if (pending_) { publish(); return; }
     SyncPlanner::Command command{};
     if (!mailbox_.take(command)) return;
+    noteBarrierCommand(command.kind);
     if(observer_) {observer_->begin(command.kind,command.ticket,command.total);observer_->end(RpcWorker::Outcome{},SyncPlanner::BarrierState::None,false);}
     completion_={};completion_.ticket=command.ticket;pending_=true;publish();
   }
@@ -77,9 +79,12 @@ class SyncNetworkWorker {
     SyncPlanner::Command command{};
     if (!mailbox_.take(command)) return;
     completion_={}; completion_.ticket=command.ticket;
+    noteBarrierCommand(command.kind);
     if(observer_)observer_->begin(command.kind,command.ticket,command.total);
     const auto outcome=RpcWorker::execute(exchange_,command,secret_,completion_.reply);
     if(observer_)observer_->end(outcome,completion_.reply.barrierState,true);
+    if(outcome.result==RpcWorker::Result::Ok && barrierActive_ &&
+       (completion_.reply.barrierState==SyncPlanner::BarrierState::Completed || completion_.reply.barrierState==SyncPlanner::BarrierState::Cancelled))barrierActive_=false;
     lastKind_=command.kind;lastOutcome_=outcome;
     if (outcome.result!=RpcWorker::Result::Ok) completion_.reply={};
     pending_=true;
@@ -90,7 +95,10 @@ class SyncNetworkWorker {
   RpcExchange& exchange_;
   const char* secret_;RpcObserver* observer_;
   SyncMailbox::Completion completion_{};
-  bool pending_=false;
+  bool pending_=false,barrierActive_=false;
+  void noteBarrierCommand(SyncPlanner::Kind kind) {
+    if(kind==SyncPlanner::Kind::Freeze || kind==SyncPlanner::Kind::BarrierStatus || kind==SyncPlanner::Kind::Renew || kind==SyncPlanner::Kind::Abort)barrierActive_=true;
+  }
   SyncPlanner::Kind lastKind_=SyncPlanner::Kind::None;RpcWorker::Outcome lastOutcome_{};
   void publish() {
     // If temporarily full, keep the exact result and retry; do not repeat RPC.

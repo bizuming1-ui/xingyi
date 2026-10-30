@@ -46,6 +46,24 @@ class TrustedTimeWindow {
     received_=responseReceivedMs;lastRead_=now;valid_=true;
     return true;
   }
+  // Refresh around the midpoint, without extending the original hard expiry.
+  bool refreshDue() {
+    Bounds ignored{};if(!bounds(ignored))return false;
+    return lastRead_-received_ >= lifetime_/2;
+  }
+  // Replace atomically only with a fresh verified proof. Invalid timing or
+  // clock faults fail closed. The caller owns proof authentication.
+  bool replaceVerified(uint64_t serverSeconds,uint64_t requestStartedMs,uint64_t responseReceivedMs) {
+    Bounds existing{};
+    if(!bounds(existing))return false; // preserve mode requires an existing valid window
+    TrustedTimeWindow candidate(clock_,lifetime_,driftPpm_);
+    if(!candidate.acceptVerified(serverSeconds,requestStartedMs,responseReceivedMs)) {
+      invalidate();return false;
+    }
+    if(candidate.lastRead_<lastRead_) {invalidate();return false;}
+    baseLo_=candidate.baseLo_;baseHi_=candidate.baseHi_;received_=candidate.received_;
+    lastRead_=candidate.lastRead_;valid_=true;return true;
+  }
   bool bounds(Bounds& out) {
     if(!valid_)return false;
     uint64_t now=0;

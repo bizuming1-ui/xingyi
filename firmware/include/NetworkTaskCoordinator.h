@@ -8,6 +8,8 @@ class NetworkTimeService {
   virtual ~NetworkTimeService()=default;
   virtual bool trusted()=0;
   virtual bool refresh()=0; // may block within its bounded network deadline
+  virtual bool refreshDue() {return false;}
+  virtual bool refreshPreserving() {return false;}
   virtual void invalidate()=0;
 };
 class NetworkTaskClock {
@@ -43,6 +45,15 @@ class NetworkTaskCoordinator {
         // Backoff is measured from completion, including timeout duration.
         attempted_=true;lastAttempt_=clock_.nowMillis();
       }
+      if(!time_.trusted()){worker_.failUnavailable();return;}
+    }
+    // A proactive attempt never lengthens an old proof's expiry. Skip it
+    // while a barrier is being resolved so a heartbeat is not preempted by a
+    // bootstrap on the shared TCP transport. Hard expiry still fails closed.
+    if(time_.trusted() && time_.refreshDue() && !worker_.barrierActive() &&
+       (!attempted_ || static_cast<uint32_t>(now-lastAttempt_)>=TIME_RETRY_MS)) {
+      worker_.closeConnection();(void)time_.refreshPreserving();
+      attempted_=true;lastAttempt_=clock_.nowMillis();
       if(!time_.trusted()){worker_.failUnavailable();return;}
     }
     worker_.step();

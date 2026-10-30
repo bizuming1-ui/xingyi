@@ -63,6 +63,11 @@ int main(int argc,char** argv){
  assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000)==R::Ok);
  TrustedTimeWindow::Bounds bounds{};assert(window.bounds(bounds));
  assert(bounds.earliestMs>=1704067200000ULL && bounds.latestMs>bounds.earliestMs);
+ // Bad new proof must not extend or destroy a still-valid old proof.
+ assert(sync.refreshPreserving("project123.supabase.co","sb_publishable_test",ca.c_str(),id,"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",3000)==R::InvalidProof);
+ assert(window.bounds(bounds));
+ assert(sync.refreshPreserving("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000)==R::Ok);
+ assert(window.bounds(bounds));
  assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",3000)==R::InvalidProof);
  assert(!window.bounds(bounds));assert(sync.lastStage()==TimeBootstrapExchange::Stage::Proof);
  seconds=42;

@@ -21,16 +21,28 @@ class TimeWindowSynchronizer {
   uint32_t lastRxBytes() const {return bootstrap_.lastRxBytes();}
   TimeBootstrapExchange::Result refresh(const char* host,const char* key,const char* ca,
                                        const char* deviceId,const char* secret,uint32_t timeoutMs) {
-    stage_=TimeBootstrapExchange::Stage::Clock;detail_=0;window_.invalidate();uint64_t before=0,after=0,seconds=0;
-    if(!window_.usesClock(clock_) || !clock_.read(before))return TimeBootstrapExchange::Result::Unavailable;
+    return refreshImpl(host,key,ca,deviceId,secret,timeoutMs,false);
+  }
+  TimeBootstrapExchange::Result refreshPreserving(const char* host,const char* key,const char* ca,
+                                       const char* deviceId,const char* secret,uint32_t timeoutMs) {
+    return refreshImpl(host,key,ca,deviceId,secret,timeoutMs,true);
+  }
+ private:
+  TimeBootstrapExchange::Result refreshImpl(const char* host,const char* key,const char* ca,
+                                       const char* deviceId,const char* secret,uint32_t timeoutMs,bool preserve) {
+    stage_=TimeBootstrapExchange::Stage::Clock;detail_=0;
+    if(!preserve)window_.invalidate();
+    else {TrustedTimeWindow::Bounds b{};if(!window_.bounds(b))return TimeBootstrapExchange::Result::Unavailable;}
+    uint64_t before=0,after=0,seconds=0;
+    if(!window_.usesClock(clock_) || !clock_.read(before)) {window_.invalidate();return TimeBootstrapExchange::Result::Unavailable;}
     const auto result=bootstrap_.fetch(host,key,ca,deviceId,secret,timeoutMs,seconds);
     stage_=bootstrap_.lastStage();detail_=bootstrap_.lastDetail();
     if(result!=TimeBootstrapExchange::Result::Ok)return result;
     stage_=TimeBootstrapExchange::Stage::Clock;detail_=0;
-    if(!clock_.read(after) || !window_.acceptVerified(seconds,before,after))return TimeBootstrapExchange::Result::Unavailable;
+    if(!clock_.read(after)) {window_.invalidate();return TimeBootstrapExchange::Result::Unavailable;}
+    if(!(preserve?window_.replaceVerified(seconds,before,after):window_.acceptVerified(seconds,before,after)))return TimeBootstrapExchange::Result::Unavailable;
     stage_=TimeBootstrapExchange::Stage::Complete;return TimeBootstrapExchange::Result::Ok;
   }
- private:
   MonotonicMillis64& clock_;TrustedTimeWindow& window_;TimeBootstrapExchange& bootstrap_;
   TimeBootstrapExchange::Stage stage_=TimeBootstrapExchange::Stage::Idle;int detail_=0;
 };

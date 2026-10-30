@@ -16,6 +16,12 @@ class AuthenticatedNetworkTime final : public NetworkTimeService {
     lastResult_=sync_.refresh(host_,key_,ca_,deviceId_,secret_,timeout_);
     return lastResult_==TimeBootstrapExchange::Result::Ok && trusted();
   }
+  bool refreshDue() override {return sync_.usesWindow(window_) && window_.refreshDue();}
+  bool refreshPreserving() override {
+    if(!sync_.usesWindow(window_))return false;
+    lastResult_=sync_.refreshPreserving(host_,key_,ca_,deviceId_,secret_,timeout_);
+    return lastResult_==TimeBootstrapExchange::Result::Ok && trusted();
+  }
   int lastStage() const {return static_cast<int>(sync_.lastStage());}
   int lastDetail() const {return sync_.lastDetail();}
   int lastResult() const {return static_cast<int>(lastResult_);}

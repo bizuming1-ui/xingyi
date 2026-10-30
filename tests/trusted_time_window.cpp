@@ -23,6 +23,19 @@ int main(){
  clock.now=static_cast<uint64_t>(UINT32_MAX)+10;assert(t.acceptVerified(epoch,static_cast<uint64_t>(UINT32_MAX)-10,clock.now));
  clock.now+=100;assert(t.bounds(bounds));assert(bounds.earliestMs>=epoch*1000+98);
  t.invalidate();assert(!t.bounds(bounds));
+ // An unsuccessful proactive replacement does not shorten or extend trust.
+ Clock renewClock;renewClock.now=1000;TrustedTimeWindow renewing(renewClock,60000,9999);
+ assert(renewing.acceptVerified(epoch,900,1000));renewClock.now=30999;assert(!renewing.refreshDue());
+ renewClock.now=31000;assert(renewing.refreshDue());
+ assert(renewing.bounds(bounds));
+ renewClock.now=60999;assert(renewing.bounds(bounds));renewClock.now=61000;assert(!renewing.bounds(bounds));
+ renewClock.now=70000;assert(renewing.acceptVerified(epoch,69900,70000));
+ renewClock.now=100000;assert(renewing.replaceVerified(epoch+30,99900,100000));
+ renewClock.now=129999;assert(renewing.bounds(bounds));renewClock.now=160000;assert(!renewing.bounds(bounds));
+ renewClock.now=170000;assert(renewing.acceptVerified(epoch,169900,170000));
+ assert(!renewing.replaceVerified(1,169900,170000));assert(!renewing.bounds(bounds));
+ renewClock.now=200000;assert(renewing.acceptVerified(epoch,199900,200000));
+ renewClock.now=199999;assert(!renewing.replaceVerified(epoch,199000,199999));assert(!renewing.bounds(bounds));
  // Deterministic simulation of signed second rounding, ms quantization, path
  // delay and a range of fast/slow monotonic clocks under the declared bound.
  std::mt19937 rng(42);

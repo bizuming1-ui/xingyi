@@ -31,9 +31,11 @@ struct Lock : RadioLifecycleLock {bool busy=false;bool tryLock() override{if(bus
 struct Station : WifiStation {bool online=false;int starts=0;bool start(const char*,const char*) override{++starts;return true;}bool connected() override{return online;}void disconnect() override{}};
 struct Clock : NetworkTaskClock {std::atomic<uint32_t> now{0};uint32_t nowMillis() override{return now.load();}};
 struct Time : NetworkTimeService {
- std::atomic<bool> valid{false},block{false},entered{false},release{false};int refreshes=0,invalidations=0;bool success=false;
+ std::atomic<bool> valid{false},block{false},entered{false},release{false};int refreshes=0,invalidations=0,preserves=0;bool success=false,due=false;
  bool trusted() override{return valid.load();}
  bool refresh() override{++refreshes;if(block.load()){entered=true;while(!release.load())std::this_thread::yield();}valid=success;return success;}
+ bool refreshDue() override{return due;}
+ bool refreshPreserving() override{++preserves;return success;}
  void invalidate() override{valid=false;++invalidations;}
 };
 int main(){
@@ -76,5 +78,19 @@ int main(){
  clock2.now=UINT32_MAX-99;wrap.step();assert(time2.refreshes==1);
  clock2.now=4899;wrap.step();assert(time2.refreshes==1);
  clock2.now=4900;wrap.step();assert(time2.refreshes==2);
+ // Proactive failure retains valid time and allows RPC work; retries are
+ // rate-limited from completion. A pending barrier suppresses proactive work.
+ Lock lock3;Station station3;station3.online=true;WifiSupervisor supervisor3(station3,"network","password");
+ GuardedWifiSupervisor wifi3(lock3,supervisor3);Clock clock3;Time time3;Mailbox mailbox3;Exchange exchange3;
+ SyncNetworkWorker worker3(mailbox3,exchange3,"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+ NetworkTaskCoordinator proactive(clock3,wifi3,time3,worker3);time3.valid=true;time3.due=true;
+ proactive.step();time3.valid=true;clock3.now=1;proactive.step();assert(time3.preserves==1 && time3.trusted());
+ clock3.now=4999;proactive.step();assert(time3.preserves==1);
+ clock3.now=5001;proactive.step();assert(time3.preserves==2);
+ SyncPlanner::Command freeze{};freeze.kind=SyncPlanner::Kind::Freeze;assert(mailbox3.submit(freeze));
+ worker3.failUnavailable();assert(worker3.barrierActive());
+ clock3.now=11000;proactive.step();assert(time3.preserves==2 && time3.trusted());
+ // Loss of trust must bootstrap even when a barrier is being resolved.
+ time3.valid=false;clock3.now=16000;proactive.step();assert(time3.refreshes==1);
  std::cout<<"network task coordination and offline count tests passed\n";
 }
