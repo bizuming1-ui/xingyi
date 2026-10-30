@@ -42,6 +42,8 @@ jobs:
           url=https://xypisxdlxcqyavixdiji.supabase.co/rest/v1/
           # No device credentials or user data. num_connects=0 for the second
           # request indicates the curl client reused its first TLS connection.
-          curl --http1.1 --silent --show-error --max-time 20 \
+          result=$(curl --http1.1 --silent --show-error --max-time 20 \
             --write-out 'status=%{http_code} new_connections=%{num_connects} total=%{time_total}\n' \
-            --output /dev/null "$url" --output /dev/null "$url"
+            --output /dev/null "$url" --output /dev/null "$url")
+          echo "$result"
+          echo "::notice title=HTTP reuse probe::${result//$'\n'/' | '}"
