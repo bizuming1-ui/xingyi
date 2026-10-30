@@ -58,6 +58,12 @@ int main(){
   FakeTls upload;upload.readDelay=3500;upload.incoming=data.incoming;
   HttpRpcExchange longUpload(upload,"project123.supabase.co",key,3000,8000);
   assert(longUpload.post("device_ingest","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  FakeTls abort;abort.readDelay=3500;abort.incoming=data.incoming;
+  HttpRpcExchange slowAbort(abort,"project123.supabase.co",key,3000,8000);
+  assert(slowAbort.post(RpcCodec::endpoint(SyncPlanner::Kind::Abort),"{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  FakeTls state;state.readDelay=3500;state.incoming=data.incoming;
+  HttpRpcExchange slowState(state,"project123.supabase.co",key,3000,8000);
+  assert(slowState.post(RpcCodec::endpoint(SyncPlanner::Kind::BarrierStatus),"{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
   FakeTls lease;lease.readDelay=3500;lease.incoming=data.incoming;
   HttpRpcExchange shortLease(lease,"project123.supabase.co",key,3000,8000);
   assert(shortLease.post(RpcCodec::endpoint(SyncPlanner::Kind::Renew),"{}",2,output,sizeof(output)).status==RpcExchange::Status::Timeout);

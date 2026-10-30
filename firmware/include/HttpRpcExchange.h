@@ -37,11 +37,14 @@ class HttpRpcExchange final : public RpcExchange {
     } capture{*this,result};
     if(!validHost(host_) || !validKey(key_) || !validEndpoint(endpoint) || !json || jsonLength==0 || jsonLength>767 ||
        !response || responseCapacity>RpcCodec::MAX_RESPONSE_BYTES || timeoutMs_==0 || timeoutMs_>30000 || dataTimeoutMs_==0 || dataTimeoutMs_>30000) return result;
-    // Poll/upload may need a longer network budget on high-latency links.
-    // Freeze/lease operations retain their separate shorter budget. A timeout
-    // never counts as an acknowledgement, and server lease checks still apply.
+    // Status, upload, abort and barrier-status recovery may need more time on
+    // slow links. Neither abort nor status grants or extends a lease. Freeze
+    // and renew retain the short budget and server-side lease validation.
+    // A timeout never counts as an acknowledgement or as a terminal outcome.
     activeTimeoutMs_=(strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Poll))==0 ||
-                      strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Upload))==0)?dataTimeoutMs_:timeoutMs_;
+                      strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Upload))==0 ||
+                      strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::BarrierStatus))==0 ||
+                      strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Abort))==0)?dataTimeoutMs_:timeoutMs_;
     char headers[768]{};
     const int n=snprintf(headers,sizeof(headers),
       "POST /rest/v1/rpc/%s HTTP/1.1\r\nHost: %s\r\napikey: %s\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %lu\r\n\r\n",
