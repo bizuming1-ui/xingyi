@@ -19,11 +19,12 @@ class SyncController {
  public:
   SyncController(SyncPlanner& planner,SyncMailbox& mailbox) : planner_(planner), mailbox_(mailbox) {}
   bool faulted() const { return fault_ || planner_.faulted(); }
+  int diagnosticFault() const {return faultReason_;}
   void step(uint32_t now) {
     if (faulted()) return;
     SyncMailbox::Completion done{};
     if (mailbox_.collect(done) && !planner_.complete(done.ticket,done.reply,now)) {
-      fault_=true; return; // unexpected/stale completion: stop safely
+      fault_=true;faultReason_=1; return; // unexpected/stale completion: stop safely
     }
     const auto command=planner_.next(now);
     if (command.kind!=SyncPlanner::Kind::None && !mailbox_.submit(command)) {
@@ -31,13 +32,13 @@ class SyncController {
       // silently replace the command; require explicit operator recovery.
       SyncPlanner::Reply failed{};
       (void)planner_.complete(command.ticket,failed,now);
-      fault_=true;
+      fault_=true;faultReason_=2;
     }
   }
  private:
   SyncPlanner& planner_;
   SyncMailbox& mailbox_;
-  bool fault_=false;
+  bool fault_=false;int faultReason_=0;
 };
 
 // Exclusively owned by the network thread. step() can block in the transport;

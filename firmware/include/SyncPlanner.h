@@ -42,7 +42,7 @@ class SyncPlanner {
 
   SyncPlanner(DurableCounter& counter, EpochSource& epochs)
       : counter_(counter), epochs_(epochs), streamRegistered_(!counter.isReady()) {
-    if (!counter.isLoaded()) fault_=true;
+    if (!counter.isLoaded()) setFault(FaultReason::NotLoaded);
     // On reboot we do not know whether the server has seen this epoch, even
     // when its local total is zero. Frozen state must be resolved first.
     if (counter.isReady()) streamRegistered_=false;
@@ -52,10 +52,16 @@ class SyncPlanner {
   DurableCounter::Result count(uint32_t amount) {
     if (fault_) return DurableCounter::Result::NotReady;
     const auto r=counter_.add(amount);
-    if (r==DurableCounter::Result::StorageError || r==DurableCounter::Result::Full || r==DurableCounter::Result::NotReady) fault_=true;
+    if (r==DurableCounter::Result::StorageError || r==DurableCounter::Result::Full || r==DurableCounter::Result::NotReady) setFault(FaultReason::Count);
     return r;
   }
   bool faulted() const { return fault_; }
+  // Numeric-only diagnostics, retained until restart. Never include credentials.
+  enum class FaultReason { None=0, NotLoaded=1, Count=2, BindingRevision=3, Entropy=4,
+    Bind=5, BeginFreeze=6, PollBinding=7, PollBarrier=8, RemoteFrozenWithoutJournal=9,
+    UploadMismatch=10, Acknowledge=11, BarrierMismatch=12, FinishFreeze=13,
+    MissingNonce=14, UnexpectedBarrier=15, UnexpectedCommand=16 };
+  FaultReason faultReason() const {return faultReason_;}
   bool hasInFlight() const { return inFlight_.kind!=Kind::None; }
   Kind diagnosticInFlight() const {return inFlight_.kind;}
   BarrierState diagnosticBarrier() const {return remoteBarrier_;}
@@ -68,7 +74,7 @@ class SyncPlanner {
     // A single global minimum interval also bounds retry rate after failures.
     if (sentAny_ && elapsed(now,lastSent_)<200) return {};
     if (counter_.isFrozen()) {
-      if (!counter_.canReportFrozen()) return issue(Kind::Abort,now);
+      if (mustAbort_ || !counter_.canReportFrozen()) return issue(Kind::Abort,now);
       if (needBarrierStatus_) return issue(Kind::BarrierStatus,now);
       if (remoteBarrier_==BarrierState::Requested) return issue(Kind::Freeze,now);
       if (remoteBarrier_==BarrierState::Ready && uuid(nonce_) && (!renewed_ || elapsed(now,lastRenew_)>=750)) return issue(Kind::Renew,now);
@@ -85,21 +91,21 @@ class SyncPlanner {
       const bool same=counter_.isReady() && s.bindingRevision==desiredRevision_ && strcmp(s.bindingId,desiredBinding_)==0 && strcmp(s.orderId,desiredOrder_)==0;
       if (!same) {
         // A stale server response is never allowed to move the device back.
-        if (counter_.isReady() && desiredRevision_<=s.bindingRevision) { fault_=true; return {}; }
+        if (counter_.isReady() && desiredRevision_<=s.bindingRevision) { setFault(FaultReason::BindingRevision); return {}; }
         if (epochAttempted_ && elapsed(now,lastEpochAttempt_)<200) return {};
         epochAttempted_=true;lastEpochAttempt_=now;
         char epoch[37]{};
-        if (!epochs_.generate(epoch)) { if(!epochs_.failureMayRetry())fault_=true; return {}; }
+        if (!epochs_.generate(epoch)) { if(!epochs_.failureMayRetry())setFault(FaultReason::Entropy); return {}; }
         const auto r=counter_.bind(desiredOrder_,desiredRevision_,desiredBinding_,epoch);
         if (r==DurableCounter::Result::Pending || r==DurableCounter::Result::Frozen) return {};
-        if (r!=DurableCounter::Result::Ok) { fault_=true; return {}; }
+        if (r!=DurableCounter::Result::Ok) { setFault(FaultReason::Bind); return {}; }
         streamRegistered_=false;
         return issue(Kind::Upload,now); // register even a zero-count epoch
       }
     }
     if (remoteBarrier_==BarrierState::Requested && uuid(barrier_) && counter_.isReady() && streamRegistered_ && counter_.pending()==0) {
       const auto r=counter_.beginFreeze(barrier_);
-      if (r!=DurableCounter::Result::Ok) { fault_=true; return {}; }
+      if (r!=DurableCounter::Result::Ok) { setFault(FaultReason::BeginFreeze); return {}; }
       return issue(Kind::Freeze,now);
     }
     return {};
@@ -108,7 +114,7 @@ class SyncPlanner {
   // A failed/timed-out response is never treated as an acknowledgement. For
   // frozen operations, query the server's authoritative barrier state before
   // deciding whether to resume or retry. Unknown/stale tickets are ignored.
-  bool complete(uint32_t ticket, const Reply& reply, uint32_t now) {
+  bool complete(uint32_t ticket, const Reply& reply, uint32_t /*now*/) {
     if (!hasInFlight() || ticket!=inFlight_.ticket) return false;
     const Command sent=inFlight_; inFlight_={};
     if (!reply.success) {
@@ -119,45 +125,56 @@ class SyncPlanner {
       case Kind::Poll: {
         if (reply.desiredRevision>DurableCounter::MAX_COUNT ||
             (reply.desiredRevision==0 && (reply.desiredOrder[0] || reply.desiredBinding[0] || counter_.isReady())) ||
-            (reply.desiredRevision>0 && (!uuid(reply.desiredOrder) || !uuid(reply.desiredBinding)))) { fault_=true; break; }
+            (reply.desiredRevision>0 && (!uuid(reply.desiredOrder) || !uuid(reply.desiredBinding)))) { setFault(FaultReason::PollBinding); break; }
         desiredRevision_=reply.desiredRevision; copy(desiredOrder_,reply.desiredOrder); copy(desiredBinding_,reply.desiredBinding);
         if (reply.barrierState==BarrierState::None) { barrier_[0]='\0'; remoteBarrier_=BarrierState::None; }
-        else if (!uuid(reply.barrier) || (reply.barrierState!=BarrierState::Requested && reply.barrierState!=BarrierState::Ready && reply.barrierState!=BarrierState::Expired)) { fault_=true; }
+        else if (!uuid(reply.barrier) || (reply.barrierState!=BarrierState::Requested && reply.barrierState!=BarrierState::Ready && reply.barrierState!=BarrierState::Expired)) { setFault(FaultReason::PollBarrier); }
         else if (reply.barrierState==BarrierState::Ready || reply.barrierState==BarrierState::Expired) {
           // Server says it is frozen, but local journal does not: never guess.
-          fault_=true;
+          setFault(FaultReason::RemoteFrozenWithoutJournal);
         } else { copy(barrier_,reply.barrier); remoteBarrier_=reply.barrierState; }
         polled_=true;pollJustCompleted_=true; break;
       }
       case Kind::Upload: {
-        if (reply.acceptedTotal!=sent.total || strcmp(sent.epoch,counter_.state().epochId)!=0 || strcmp(sent.binding,counter_.state().bindingId)!=0) { fault_=true; break; }
-        if (counter_.acknowledge(sent.epoch,reply.acceptedTotal)!=DurableCounter::Result::Ok) { fault_=true; break; }
+        if (reply.acceptedTotal!=sent.total || strcmp(sent.epoch,counter_.state().epochId)!=0 || strcmp(sent.binding,counter_.state().bindingId)!=0) { setFault(FaultReason::UploadMismatch); break; }
+        if (counter_.acknowledge(sent.epoch,reply.acceptedTotal)!=DurableCounter::Result::Ok) { setFault(FaultReason::Acknowledge); break; }
         streamRegistered_=true; break;
       }
       case Kind::Freeze: case Kind::Renew: case Kind::BarrierStatus: case Kind::Abort: {
-        if (!counter_.isFrozen() || strcmp(sent.barrier,counter_.state().barrierId)!=0) { fault_=true; break; }
-        if (reply.barrierState==BarrierState::Completed || reply.barrierState==BarrierState::Cancelled || reply.barrierState==BarrierState::Expired) {
+        if (!counter_.isFrozen() || strcmp(sent.barrier,counter_.state().barrierId)!=0) { setFault(FaultReason::BarrierMismatch); break; }
+        // Expired is computed from the lease on a server row still in ready
+        // state. Abort it under the server lock before clearing the journal.
+        // If the reply is lost, retain the frozen journal and retry abort;
+        // after reboot, status recovers the same expired/completed/cancelled row.
+        if (reply.barrierState==BarrierState::Expired) {
+          mustAbort_=true;needBarrierStatus_=false;remoteBarrier_=BarrierState::Expired;
+        } else if (reply.barrierState==BarrierState::Completed || reply.barrierState==BarrierState::Cancelled) {
           const auto outcome=reply.barrierState==BarrierState::Completed?DurableCounter::TerminalOutcome::Completed:
-            reply.barrierState==BarrierState::Cancelled?DurableCounter::TerminalOutcome::Cancelled:DurableCounter::TerminalOutcome::Expired;
-          if(counter_.finishFreeze(sent.barrier,outcome)!=DurableCounter::Result::Ok) { fault_=true; break; }
-          barrier_[0]='\0'; nonce_[0]='\0'; remoteBarrier_=BarrierState::None; needBarrierStatus_=false; renewed_=false; polled_=false;
+            DurableCounter::TerminalOutcome::Cancelled;
+          if(counter_.finishFreeze(sent.barrier,outcome)!=DurableCounter::Result::Ok) { setFault(FaultReason::FinishFreeze); break; }
+          barrier_[0]='\0'; nonce_[0]='\0'; remoteBarrier_=BarrierState::None; needBarrierStatus_=false; mustAbort_=false; renewed_=false; polled_=false;
         } else if (reply.barrierState==BarrierState::Ready) {
-          if (!uuid(reply.nonce)) { fault_=true; break; }
+          if (!uuid(reply.nonce)) { setFault(FaultReason::MissingNonce); break; }
           copy(nonce_,reply.nonce); remoteBarrier_=BarrierState::Ready; needBarrierStatus_=false;
-          renewed_=true; lastRenew_=now;
+          // Schedule from request start, not receipt: network delay already
+          // consumes the server lease. Long responses trigger the next renew
+          // promptly (subject to the global minimum interval).
+          renewed_=true; lastRenew_=lastSent_;
         } else if (reply.barrierState==BarrierState::Requested && sent.kind==Kind::BarrierStatus) {
           remoteBarrier_=BarrierState::Requested; needBarrierStatus_=false;
-        } else { fault_=true; }
+        } else { setFault(FaultReason::UnexpectedBarrier); }
         break;
       }
-      default: fault_=true; break;
+      default: setFault(FaultReason::UnexpectedCommand); break;
     }
     return true;
   }
 
  private:
   DurableCounter& counter_; EpochSource& epochs_;
-  bool fault_=false, sentAny_=false, polled_=false, pollJustCompleted_=false, streamRegistered_=false, needBarrierStatus_=false, renewed_=false, epochAttempted_=false;
+  FaultReason faultReason_=FaultReason::None;
+  void setFault(FaultReason reason) {fault_=true;faultReason_=reason;}
+  bool fault_=false, sentAny_=false, polled_=false, pollJustCompleted_=false, streamRegistered_=false, needBarrierStatus_=false, mustAbort_=false, renewed_=false, epochAttempted_=false;
   uint32_t lastSent_=0,lastPoll_=0,lastRenew_=0,lastEpochAttempt_=0,nextTicket_=0;
   uint64_t desiredRevision_=0;
   char desiredOrder_[37]{},desiredBinding_[37]{},barrier_[37]{},nonce_[37]{};

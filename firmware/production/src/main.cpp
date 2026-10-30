@@ -167,7 +167,10 @@ void loop() {
     status(controller->faulted()?"FAULT: sync stopped; do not erase NVS":statusName(sample.status));
   } else if(now-lastStatus>=STATUS_INTERVAL_MS) {
     lastStatus=now;
-    if(controller->faulted()) status("FAULT: sync stopped; do not erase NVS");
+    if(controller->faulted()) {
+      char info[64];snprintf(info,sizeof(info),"FAULT_DIAG planner=%d controller=%d",static_cast<int>(countPlanner->faultReason()),controller->diagnosticFault());status(info);
+      status("FAULT: sync stopped; do not erase NVS");
+    }
     else {
       char info[64];
       snprintf(info,sizeof(info),"WIFI=%d TIME=%d BOUND=%d PENDING=%llu",radioOnline.load()?1:0,timeTrusted.load()?1:0,counter.isReady()?1:0,static_cast<unsigned long long>(counter.pending()));

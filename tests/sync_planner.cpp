@@ -48,6 +48,8 @@ int main(){
  assert(slow.complete(slowCmd.ticket,status(order1,binding1,1,B::Requested),9000));
  slowCmd=slow.next(9000);assert(slowCmd.kind==K::Freeze && slowCounter.isFrozen());
  assert(slow.complete(slowCmd.ticket,frozen(B::Ready),10800));
+ // A slow freeze reply must not add another 750 ms before renewal.
+ slowCmd=slow.next(10800);assert(slowCmd.kind==K::Renew);
  Store coldStore; DurableCounter unloaded(coldStore); Epochs coldEpochs; SyncPlanner beforeLoad(unloaded,coldEpochs);
  assert(beforeLoad.faulted() && beforeLoad.next(0).kind==K::None);
  Store store;DurableCounter c(store);assert(c.load()==R::Ok);Epochs epochs;SyncPlanner p(c,epochs);
@@ -85,11 +87,43 @@ int main(){
  cmd=restarted.next(900);assert(cmd.kind==K::Freeze && cmd.total==3);assert(restarted.complete(cmd.ticket,lost,910));
  cmd=restarted.next(1100);assert(cmd.kind==K::BarrierStatus);assert(restarted.complete(cmd.ticket,frozen(B::Ready),1110));
  cmd=restarted.next(1800);assert(cmd.kind==K::None);
- cmd=restarted.next(1900);assert(cmd.kind==K::Renew);assert(strcmp(cmd.nonce,nonce)==0);
+ cmd=restarted.next(1850);assert(cmd.kind==K::Renew);assert(strcmp(cmd.nonce,nonce)==0);
  assert(!restarted.complete(cmd.ticket+1,frozen(B::Expired),1910));assert(restarted.hasInFlight());
- assert(restarted.complete(cmd.ticket,frozen(B::Expired),1920));assert(!restored.isFrozen());
+ assert(restarted.complete(cmd.ticket,frozen(B::Expired),1920));
+ // Expired is a derived view of a still-ready row, not a durable terminal
+ // state. Keep the journal frozen until server-side abort really completes.
+ assert(restored.isFrozen() && !restarted.faulted());
+ cmd=restarted.next(2100);assert(cmd.kind==K::Abort);
+ assert(restarted.complete(cmd.ticket,lost,2110) && restored.isFrozen());
+ cmd=restarted.next(2300);assert(cmd.kind==K::Abort);
+ assert(restarted.complete(cmd.ticket,frozen(B::Cancelled),2310));
+ assert(!restored.isFrozen() && !restarted.faulted() && restored.pending()==0);
+ cmd=restarted.next(2500);assert(cmd.kind==K::Poll);
+ assert(restarted.complete(cmd.ticket,status(order2,binding2,2),2510) && !restarted.faulted());
  // Storage failure is fail-closed rather than reporting a successful press.
  store.fail=true;assert(restarted.count(1)==R::StorageError);assert(restarted.faulted());assert(restarted.next(3000).kind==K::None);
+
+ // Reboot after expired/ambiguous abort: persisted freeze is resolved by
+ // authoritative status, and a commit winning the abort race is preserved.
+ Store expStore;DurableCounter expCounter(expStore);assert(expCounter.load()==R::Ok);
+ assert(expCounter.bind(order1,1,binding1,"10000000-0000-4000-8000-000000000001")==R::Ok);
+ assert(expCounter.add(4)==R::Ok && expCounter.acknowledge(expCounter.state().epochId,4)==R::Ok);
+ assert(expCounter.beginFreeze(barrier)==R::Ok);Epochs expEpoch;SyncPlanner exp(expCounter,expEpoch);
+ auto expCmd=exp.next(0);assert(expCmd.kind==K::BarrierStatus);
+ assert(exp.complete(expCmd.ticket,frozen(B::Expired),1) && expCounter.isFrozen());
+ expCmd=exp.next(200);assert(expCmd.kind==K::Abort);
+ assert(exp.complete(expCmd.ticket,lost,201) && expCounter.isFrozen());
+ DurableCounter rebootCounter(expStore);assert(rebootCounter.load()==R::Ok && rebootCounter.isFrozen());
+ SyncPlanner recovered(rebootCounter,expEpoch);expCmd=recovered.next(0);assert(expCmd.kind==K::BarrierStatus);
+ assert(recovered.complete(expCmd.ticket,frozen(B::Expired),1) && rebootCounter.isFrozen());
+ expCmd=recovered.next(200);assert(expCmd.kind==K::Abort);
+ assert(recovered.complete(expCmd.ticket,frozen(B::Completed),201));
+ assert(!rebootCounter.isFrozen() && rebootCounter.state().total==4 && rebootCounter.pending()==0 && !recovered.faulted());
+ // A fresh ready row without a persisted local freeze remains a hard fault.
+ Store noJournal;DurableCounter noJournalCounter(noJournal);assert(noJournalCounter.load()==R::Ok);
+ Epochs noJournalEpoch;SyncPlanner uncertain(noJournalCounter,noJournalEpoch);expCmd=uncertain.next(0);
+ assert(uncertain.complete(expCmd.ticket,status(order1,binding1,1,B::Expired),1));
+ assert(uncertain.faulted() && uncertain.faultReason()==SyncPlanner::FaultReason::RemoteFrozenWithoutJournal);
 
  // Fail closed if server claims an impossible acknowledgement.
  Store store2; DurableCounter c2(store2); assert(c2.load()==R::Ok); Epochs epochs2; SyncPlanner invalid(c2,epochs2);
