@@ -24,8 +24,8 @@ class VerifiedTlsChannel {
 // Runtime must provide a real verified TLS channel and synchronized clock.
 class HttpRpcExchange final : public RpcExchange {
  public:
-  HttpRpcExchange(VerifiedTlsChannel& channel,const char* host,const char* publishableKey,uint32_t timeoutMs)
-    : channel_(channel),host_(host),key_(publishableKey),timeoutMs_(timeoutMs) {}
+  HttpRpcExchange(VerifiedTlsChannel& channel,const char* host,const char* publishableKey,uint32_t timeoutMs,uint32_t dataTimeoutMs=0)
+    : channel_(channel),host_(host),key_(publishableKey),timeoutMs_(timeoutMs),dataTimeoutMs_(dataTimeoutMs?dataTimeoutMs:timeoutMs),activeTimeoutMs_(timeoutMs) {}
   enum class Stage { Idle, Validate, Connect, Send, Receive, Complete };
   Stage lastStage() const {return stage_;}
   Status lastStatus() const {return status_;}
@@ -36,7 +36,12 @@ class HttpRpcExchange final : public RpcExchange {
       ~Capture(){owner.status_=response.status;owner.httpStatus_=response.httpStatus;}
     } capture{*this,result};
     if(!validHost(host_) || !validKey(key_) || !validEndpoint(endpoint) || !json || jsonLength==0 || jsonLength>767 ||
-       !response || responseCapacity>RpcCodec::MAX_RESPONSE_BYTES || timeoutMs_==0 || timeoutMs_>30000) return result;
+       !response || responseCapacity>RpcCodec::MAX_RESPONSE_BYTES || timeoutMs_==0 || timeoutMs_>30000 || dataTimeoutMs_==0 || dataTimeoutMs_>30000) return result;
+    // Poll/upload may need a longer network budget on high-latency links.
+    // Freeze/lease operations retain their separate shorter budget. A timeout
+    // never counts as an acknowledgement, and server lease checks still apply.
+    activeTimeoutMs_=(strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Poll))==0 ||
+                      strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Upload))==0)?dataTimeoutMs_:timeoutMs_;
     char headers[768]{};
     const int n=snprintf(headers,sizeof(headers),
       "POST /rest/v1/rpc/%s HTTP/1.1\r\nHost: %s\r\napikey: %s\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %lu\r\n\r\n",
@@ -45,7 +50,7 @@ class HttpRpcExchange final : public RpcExchange {
     const uint32_t start=channel_.nowMillis();
     struct Closer { VerifiedTlsChannel& ch; explicit Closer(VerifiedTlsChannel& c):ch(c){} ~Closer(){ch.close();} } closer(channel_);
     stage_=Stage::Connect;
-    const auto connected=channel_.connectVerified(host_,443,timeoutMs_);
+    const auto connected=channel_.connectVerified(host_,443,activeTimeoutMs_);
     if(connected!=VerifiedTlsChannel::Connect::Ok) { result.status=connected==VerifiedTlsChannel::Connect::Timeout?Status::Timeout:Status::NetworkError; return result; }
     if(!remaining(start)) { result.status=Status::Timeout; return result; }
     stage_=Stage::Send;
@@ -72,9 +77,9 @@ class HttpRpcExchange final : public RpcExchange {
     }
   }
  private:
-  VerifiedTlsChannel& channel_; const char* host_;const char* key_;uint32_t timeoutMs_;
+  VerifiedTlsChannel& channel_; const char* host_;const char* key_;uint32_t timeoutMs_,dataTimeoutMs_,activeTimeoutMs_;
   Stage stage_=Stage::Idle;Status status_=Status::NetworkError;int httpStatus_=0;
-  uint32_t remaining(uint32_t start) {const uint32_t elapsed=channel_.nowMillis()-start;return elapsed>=timeoutMs_?0:timeoutMs_-elapsed;}
+  uint32_t remaining(uint32_t start) {const uint32_t elapsed=channel_.nowMillis()-start;return elapsed>=activeTimeoutMs_?0:activeTimeoutMs_-elapsed;}
   int writeAll(const char* data,size_t length,uint32_t start) {
     size_t sent=0;
     while(sent<length) {

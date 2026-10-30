@@ -26,6 +26,8 @@
 namespace {
 constexpr int BUTTON_PIN=4;
 constexpr uint32_t NETWORK_TIMEOUT_MS=3000;
+// Experimental longer budget for status and count upload only.
+constexpr uint32_t DATA_RPC_TIMEOUT_MS=8000;
 // Only for initial authenticated time; remains below the 5s proof limit.
 constexpr uint32_t TIME_BOOTSTRAP_TIMEOUT_MS=4500;
 static_assert(TIME_BOOTSTRAP_TIMEOUT_MS < TimeProof::MAX_ROUND_TRIP_MS,"proof timeout must remain bounded");
@@ -124,7 +126,7 @@ void setup() {
   static MbedTlsSession tls(tcp);static VerifiedConnect verified(clock,tcp,resolved,tls);
   static TrustedTimeWindow window(monotonic,config.timeLifetimeMs,config.clockDriftPpm);
   static MbedTlsChannel channel(clock,scheduler,window,verified,tls,config.ca);
-  static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS);
+  static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS,DATA_RPC_TIMEOUT_MS);
   static SyncNetworkWorker worker(mailbox,exchange,config.secret);
   static TimeProof proof(networkEntropy);static TimeBootstrapExchange bootstrap(clock,scheduler,tcp,resolved,proof);
   static TimeWindowSynchronizer sync(monotonic,window,bootstrap);

@@ -5,11 +5,11 @@
 #include <string>
 
 struct FakeTls : VerifiedTlsChannel {
-  std::string sent, incoming; size_t cursor=0;uint32_t time=0; int closes=0, connects=0, calls=0; int maxWrite=11,maxRead=7;bool failConnect=false,timeoutRead=false, late=false;
+  std::string sent, incoming; size_t cursor=0;uint32_t time=0; int closes=0, connects=0, calls=0; int maxWrite=11,maxRead=7;bool failConnect=false,timeoutRead=false, late=false;uint32_t readDelay=0;
   uint32_t nowMillis() override {return time;}
   Connect connectVerified(const char* host,uint16_t port,uint32_t timeout) override {++connects;assert(strcmp(host,"project123.supabase.co")==0 && port==443 && timeout>0);return failConnect?Connect::Error:Connect::Ok;}
   int write(const char* data,size_t length,uint32_t timeout) override {assert(timeout);++calls;size_t n=length<static_cast<size_t>(maxWrite)?length:static_cast<size_t>(maxWrite);sent.append(data,n);++time;return static_cast<int>(n);}
-  int read(char* out,size_t cap,uint32_t timeout) override {assert(timeout);++calls;if(timeoutRead)return -2;if(late)time+=timeout;else ++time;if(cursor==incoming.size())return 0;size_t n=incoming.size()-cursor;if(n>cap)n=cap;if(n>static_cast<size_t>(maxRead))n=maxRead;memcpy(out,incoming.data()+cursor,n);cursor+=n;return static_cast<int>(n);}
+  int read(char* out,size_t cap,uint32_t timeout) override {assert(timeout);++calls;if(timeoutRead)return -2;if(late)time+=timeout;else {time+=readDelay+1;readDelay=0;}if(cursor==incoming.size())return 0;size_t n=incoming.size()-cursor;if(n>cap)n=cap;if(n>static_cast<size_t>(maxRead))n=maxRead;memcpy(out,incoming.data()+cursor,n);cursor+=n;return static_cast<int>(n);}
   void close() override {++closes;}
 };
 const char* secret="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -50,5 +50,16 @@ int main(){
   FakeTls stalled;stalled.timeoutRead=true;HttpRpcExchange timeout(stalled,"project123.supabase.co",key,5000);
   assert(timeout.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Timeout && stalled.closes==1);
   assert(timeout.lastStage()==HttpRpcExchange::Stage::Receive && timeout.lastStatus()==RpcExchange::Status::Timeout);
+  // A delayed response is accepted only by the longer poll/upload budget;
+  // lease-related endpoints keep the original budget and still time out.
+  FakeTls data;data.readDelay=3500;data.incoming="HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+  HttpRpcExchange longData(data,"project123.supabase.co",key,3000,8000);
+  assert(longData.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  FakeTls upload;upload.readDelay=3500;upload.incoming=data.incoming;
+  HttpRpcExchange longUpload(upload,"project123.supabase.co",key,3000,8000);
+  assert(longUpload.post("device_ingest","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  FakeTls lease;lease.readDelay=3500;lease.incoming=data.incoming;
+  HttpRpcExchange shortLease(lease,"project123.supabase.co",key,3000,8000);
+  assert(shortLease.post(RpcCodec::endpoint(SyncPlanner::Kind::Renew),"{}",2,output,sizeof(output)).status==RpcExchange::Status::Timeout);
   std::cout<<"HTTP RPC exchange tests passed\n";
 }
