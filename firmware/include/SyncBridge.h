@@ -41,13 +41,23 @@ class SyncController {
   bool fault_=false;int faultReason_=0;
 };
 
+// Optional, observational only. Implementations must never block or alter the
+// RPC, counters, or replies, and must not retain credentials or request bodies.
+class RpcObserver {
+ public:
+  virtual ~RpcObserver() = default;
+  virtual void begin(SyncPlanner::Kind kind,uint32_t ticket,uint64_t total)=0;
+  // attempted=false means network/time unavailable before issuing an RPC.
+  virtual void end(const RpcWorker::Outcome& outcome,SyncPlanner::BarrierState state,bool attempted)=0;
+};
+
 // Exclusively owned by the network thread. step() can block in the transport;
 // it must NEVER be called from the GPIO thread. The caller owns secret and must
 // keep it alive, private and unchanged while this object exists.
 class SyncNetworkWorker {
  public:
-  SyncNetworkWorker(SyncMailbox& mailbox,RpcExchange& exchange,const char* secret)
-    : mailbox_(mailbox),exchange_(exchange),secret_(secret) {}
+  SyncNetworkWorker(SyncMailbox& mailbox,RpcExchange& exchange,const char* secret,RpcObserver* observer=nullptr)
+    : mailbox_(mailbox),exchange_(exchange),secret_(secret),observer_(observer) {}
   SyncPlanner::Kind lastKind() const {return lastKind_;}
   RpcWorker::Outcome lastOutcome() const {return lastOutcome_;}
   void closeConnection() {exchange_.close();}
@@ -59,6 +69,7 @@ class SyncNetworkWorker {
     if (pending_) { publish(); return; }
     SyncPlanner::Command command{};
     if (!mailbox_.take(command)) return;
+    if(observer_) {observer_->begin(command.kind,command.ticket,command.total);observer_->end(RpcWorker::Outcome{},SyncPlanner::BarrierState::None,false);}
     completion_={};completion_.ticket=command.ticket;pending_=true;publish();
   }
   void step() {
@@ -66,7 +77,9 @@ class SyncNetworkWorker {
     SyncPlanner::Command command{};
     if (!mailbox_.take(command)) return;
     completion_={}; completion_.ticket=command.ticket;
+    if(observer_)observer_->begin(command.kind,command.ticket,command.total);
     const auto outcome=RpcWorker::execute(exchange_,command,secret_,completion_.reply);
+    if(observer_)observer_->end(outcome,completion_.reply.barrierState,true);
     lastKind_=command.kind;lastOutcome_=outcome;
     if (outcome.result!=RpcWorker::Result::Ok) completion_.reply={};
     pending_=true;
@@ -75,7 +88,7 @@ class SyncNetworkWorker {
  private:
   SyncMailbox& mailbox_;
   RpcExchange& exchange_;
-  const char* secret_;
+  const char* secret_;RpcObserver* observer_;
   SyncMailbox::Completion completion_{};
   bool pending_=false;
   SyncPlanner::Kind lastKind_=SyncPlanner::Kind::None;RpcWorker::Outcome lastOutcome_{};

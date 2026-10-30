@@ -22,6 +22,7 @@
 #include "EspMonotonicMillis.h"
 #include "FreeRtosRadioLifecycleLock.h"
 #include "AuthenticatedNetworkTime.h"
+#include "MonitorEvent.h"
 
 namespace {
 constexpr int BUTTON_PIN=4;
@@ -58,6 +59,44 @@ std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0};
 std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0},rpcReuse{0};
 std::atomic<int> barrierRpcKind{0},barrierRpcResult{1},barrierRpcStage{0},barrierRpcNet{1},barrierRpcHttp{0},barrierRpcReuse{0};
+// The network task only enqueues numeric events with zero wait. Serial output
+// is owned by the counting task and also never waits. Overflow affects only
+// diagnostics, never commands, replies or persisted counts.
+class SerialRpcMonitor final : public RpcObserver {
+ public:
+  explicit SerialRpcMonitor(HttpRpcExchange& exchange):exchange_(exchange) {
+    queue_=xQueueCreateStatic(CAPACITY,sizeof(MonitorEvent),storage_,&control_);
+  }
+  void begin(SyncPlanner::Kind kind,uint32_t ticket,uint64_t total) override {
+    event_=MonitorEvent{};event_.ticket=ticket;event_.kind=static_cast<int>(kind);event_.total=total;started_=millis();
+  }
+  void end(const RpcWorker::Outcome& outcome,SyncPlanner::BarrierState state,bool attempted) override {
+    event_.endMs=millis();event_.durationMs=static_cast<uint32_t>(event_.endMs-started_);
+    event_.result=attempted?static_cast<int>(outcome.result):5;event_.barrier=static_cast<int>(state);
+    if(attempted && outcome.result!=RpcWorker::Result::InvalidRequest) {
+      event_.http=exchange_.lastHttpStatus();event_.stage=static_cast<int>(exchange_.lastStage());
+      event_.net=static_cast<int>(exchange_.lastStatus());event_.reused=exchange_.lastReused()?1:0;
+    } else {event_.net=-1;}
+    // Normal status polls are omitted; failures and all upload/barrier
+    // transactions are recorded. Gaps in ticket numbers are expected.
+    if(event_.kind==static_cast<int>(SyncPlanner::Kind::Poll) && event_.result==0)return;
+    if(!queue_ || xQueueSend(queue_,&event_,0)!=pdTRUE)lost_.fetch_add(1,std::memory_order_relaxed);
+  }
+  // Called by counting thread only; never blocks if serial is not draining.
+  void drain() {
+    if(!active_) {if(!queue_ || xQueueReceive(queue_,&display_,0)!=pdTRUE)return;active_=true;part_=0;}
+    char line[80];const int n=formatMonitorEvent(display_,part_,line,sizeof(line));
+    if(n<=0 || static_cast<size_t>(n)>=sizeof(line)) {lost_.fetch_add(1,std::memory_order_relaxed);active_=false;return;}
+    if(Serial.availableForWrite()<n+2)return;
+    Serial.println(line);if(++part_==3)active_=false;
+  }
+  uint32_t lost() const {return lost_.load(std::memory_order_relaxed);}
+ private:
+  static constexpr unsigned CAPACITY=16;
+  HttpRpcExchange& exchange_;StaticQueue_t control_{};uint8_t storage_[CAPACITY*sizeof(MonitorEvent)]{};QueueHandle_t queue_=nullptr;
+  MonitorEvent event_{},display_{};uint32_t started_=0;std::atomic<uint32_t> lost_{0};bool active_=false;unsigned part_=0;
+};
+SerialRpcMonitor* rpcMonitor=nullptr;
 bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
@@ -141,7 +180,8 @@ void setup() {
   static TrustedTimeWindow window(monotonic,config.timeLifetimeMs,config.clockDriftPpm);
   static MbedTlsChannel channel(clock,scheduler,window,verified,tls,config.ca);
   static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS,DATA_RPC_TIMEOUT_MS,true);
-  static SyncNetworkWorker worker(mailbox,exchange,config.secret);
+  static SerialRpcMonitor monitor(exchange);rpcMonitor=&monitor;
+  static SyncNetworkWorker worker(mailbox,exchange,config.secret,&monitor);
   static TimeProof proof(networkEntropy);static TimeBootstrapExchange bootstrap(clock,scheduler,tcp,resolved,proof);
   static TimeWindowSynchronizer sync(monotonic,window,bootstrap);
   static AuthenticatedNetworkTime time(window,sync,config.host,config.key,config.ca,config.deviceId,config.secret,TIME_BOOTSTRAP_TIMEOUT_MS);
@@ -178,10 +218,17 @@ void loop() {
       status(info);
     }
   }
+  // Print at most one diagnostic line per loop; never blocks the button task.
+  rpcMonitor->drain();
+  static uint32_t lastMonitorNotice=0;
+  if(now-lastMonitorNotice>=15000) {
+    char info[64];snprintf(info,sizeof(info),"MON v=1 lost=%lu",static_cast<unsigned long>(rpcMonitor->lost()));
+    status(info);lastMonitorNotice=now;
+  }
   // A local counter update is informative only: it is NOT the server draft.
   // Rate-limit to protect the GPIO/NVS task; output may be dropped when full.
   if(!controller->faulted() && counter.isReady() && counter.state().total!=lastCountTotal && now-lastCountLine>=200) {
-    char info[64];snprintf(info,sizeof(info),"COUNT total=%llu pending=%llu",static_cast<unsigned long long>(counter.state().total),static_cast<unsigned long long>(counter.pending()));
+    char info[64];snprintf(info,sizeof(info),"COUNT t=%lu total=%llu p=%llu",static_cast<unsigned long>(now),static_cast<unsigned long long>(counter.state().total),static_cast<unsigned long long>(counter.pending()));
     status(info);lastCountLine=now;lastCountTotal=counter.state().total;
   }
   // Emit only numeric failure stage/result/detail, never credentials or data.
