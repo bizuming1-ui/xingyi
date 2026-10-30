@@ -23,6 +23,8 @@ try {
    if(req.method()==='OPTIONS')return route.fulfill({status:204,headers:{...headers,'access-control-allow-methods':'GET,POST,OPTIONS','access-control-allow-headers':'*'}});
    if(u.pathname==='/auth/v1/user')return route.fulfill({status:200,headers,body:JSON.stringify(session.user)});
    if(u.pathname==='/rest/v1/rpc/is_operator')return route.fulfill({status:200,headers,body:'true'});
+   if(u.pathname==='/rest/v1/rpc/device_list')return route.fulfill({status:200,headers,body:'[]'});
+   if(u.pathname==='/rest/v1/device_order_drafts')return route.fulfill({status:200,headers,body:'null'});
    if(u.pathname==='/rest/v1/orders')return route.fulfill({status:200,headers,body:JSON.stringify([{id:'d0000000-0000-4000-8000-000000000001',order_no:'TEST',product:'测试',total:100,current_count:0,archived:false,created_at:'2026-01-01T00:00:00Z'}])});
    throw Error(`unexpected ${u.pathname}`);
   });

@@ -1,13 +1,13 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {DeviceData,DeviceMonitor} from '../src/device-data.js';
+import {DeviceData,DeviceDraftData,DeviceMonitor} from '../src/device-data.js';
 const order='00000000-0000-4000-8000-000000000001',other='00000000-0000-4000-8000-000000000002';
 const device='10000000-0000-4000-8000-000000000001',binding='20000000-0000-4000-8000-000000000001';
 function fixture() {
   const state={devices:[{id:device,label:'设备一',desired_binding_id:binding,desired_order_id:order,desired_binding_revision:1}],draft:{order_id:order,count:5},listError:null,draftError:null,bindError:null,bindId:binding,calls:[]};
   const db={rpc:async(name,args)=>{state.calls.push([name,args]);if(name==='device_list')return {data:state.devices,error:state.listError};if(name==='device_request_binding')return {data:state.bindId,error:state.bindError};throw Error(name);},
     from(table){assert.equal(table,'device_order_drafts');return {select(fields){assert.equal(fields,'order_id,count');return {eq(key,value){assert.equal(key,'order_id');assert.equal(value,order);return {maybeSingle:async()=>({data:state.draft,error:state.draftError})};}};}};}};
-  return {state,data:new DeviceData(db)};
+  return {state,db,data:new DeviceData(db)};
 }
 test('server draft and requested binding are validated independently of online state',async()=>{
   const {state,data}=fixture();assert.deepEqual(await data.load(order),{orderId:order,device:{id:device,label:'设备一',desiredBindingId:binding,desiredOrderId:order,desiredRevision:1},draftCount:5});
@@ -21,6 +21,14 @@ test('failure or malformed data is not silently converted to zero',async()=>{
   state.draft={order_id:other,count:2};await assert.rejects(()=>data.load(order),/计数数据无效/);
   state.draft=null;state.devices[0].desired_binding_revision=null;await assert.rejects(()=>data.load(order),/绑定状态无效/);
   state.devices=[state.devices[0],state.devices[0]];await assert.rejects(()=>data.load(order),/设备列表数据无效/);
+});
+test('order draft-only polling avoids device list and rejects stale or malformed values',async()=>{
+ const {state,db}=fixture();const data=new DeviceDraftData(db);
+ assert.deepEqual(await data.load(order),{orderId:order,draftCount:5});assert.equal(state.calls.length,0);
+ state.draft=null;assert.equal((await data.load(order)).draftCount,0);
+ state.draft={order_id:other,count:5};await assert.rejects(()=>data.load(order),/刷新失败/);
+ state.draft={order_id:order,count:-1};await assert.rejects(()=>data.load(order),/刷新失败/);
+ state.draftError={message:'offline'};await assert.rejects(()=>data.load(order),/刷新失败/);
 });
 test('binding requires explicit confirmation and returns only a desired binding',async()=>{
   const {state,data}=fixture();await assert.rejects(()=>data.requestBinding(device,order,false),/确认/);assert.equal(state.calls.length,0);

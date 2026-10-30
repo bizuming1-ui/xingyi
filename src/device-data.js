@@ -52,6 +52,18 @@ export class DeviceData {
   }
 }
 
+// Read only the server-side draft for an order. Avoid an unrelated device-list
+// request on the order page; it cannot establish online or synchronized state.
+export class DeviceDraftData {
+  constructor(db) {this.db=db;}
+  async load(orderId) {
+    if(!uuid(orderId))throw new Error('生产单无效。');
+    const result=await this.db.from('device_order_drafts').select('order_id,count').eq('order_id',orderId).maybeSingle();
+    if(!result || result.error || (result.data!==null && (!result.data || result.data.order_id!==orderId || !count(result.data.count))))throw new Error('设备计数刷新失败。');
+    return {orderId,draftCount:result.data===null?0:result.data.count};
+  }
+}
+
 // One polling request at a time per active run. Starting a new order or stopping
 // invalidates late completions from previous runs, including errors. A slow
 // network can exceed the interval: this is not a one-second delivery guarantee.
