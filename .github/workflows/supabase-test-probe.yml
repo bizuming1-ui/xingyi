@@ -35,3 +35,13 @@ jobs:
             --data '{"p_device":"00000000-0000-4000-8000-000000000001","p_nonce":"0000000000000000000000000000000000000000000000000000000000000000"}' \
             "https://$host/rest/v1/rpc/device_time_proof"
           echo "::notice title=Endpoint response headers::$(grep -Ei '^(HTTP/|content-length:|transfer-encoding:|content-type:)' "$RUNNER_TEMP/headers.txt" | tr '\r\n' ' ')"
+      - name: Measure unauthenticated HTTP/1.1 connection reuse (diagnostic only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=https://xypisxdlxcqyavixdiji.supabase.co/rest/v1/
+          # No device credentials or user data. num_connects=0 for the second
+          # request indicates the curl client reused its first TLS connection.
+          curl --http1.1 --silent --show-error --max-time 20 \
+            --write-out 'status=%{http_code} new_connections=%{num_connects} total=%{time_total}\n' \
+            --output /dev/null "$url" --output /dev/null "$url"
