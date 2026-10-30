@@ -23,6 +23,7 @@
 #include "FreeRtosRadioLifecycleLock.h"
 #include "AuthenticatedNetworkTime.h"
 #include "MonitorEvent.h"
+#include "BestEffortSerial.h"
 
 namespace {
 constexpr int BUTTON_PIN=4;
@@ -90,8 +91,8 @@ class SerialRpcMonitor final : public RpcObserver {
     if(!active_) {if(!queue_ || xQueueReceive(queue_,&display_,0)!=pdTRUE)return;active_=true;part_=0;}
     char line[80];const int n=formatMonitorEvent(display_,part_,line,sizeof(line));
     if(n<=0 || static_cast<size_t>(n)>=sizeof(line)) {lost_.fetch_add(1,std::memory_order_relaxed);active_=false;return;}
-    if(Serial.availableForWrite()<n+2)return;
-    Serial.println(line);if(++part_==3)active_=false;
+    if(!bestEffortLine(Serial,line))return;
+    if(++part_==3)active_=false;
   }
   uint32_t lost() const {return lost_.load(std::memory_order_relaxed);}
  private:
@@ -109,7 +110,7 @@ uint64_t lastCountTotal=0;
 // Console output is best-effort and never waits for an attached terminal. No
 // secret, SSID, device ID, production-order UUID or request body is printed.
 void status(const char* message) {
-  if(Serial.availableForWrite()>=static_cast<int>(strlen(message)+2))Serial.println(message);
+  (void)bestEffortLine(Serial,message);
 }
 bool validCa(const char* pem) {
   mbedtls_x509_crt cert;mbedtls_x509_crt_init(&cert);
@@ -163,6 +164,11 @@ const char* statusName(DeviceInput::Status s) {
 }
 void setup() {
   Serial.begin(115200);
+#if ARDUINO_USB_CDC_ON_BOOT
+  // HWCDC's default TX mutex timeout is 100ms. Diagnostics must never hold
+  // the GPIO/counting task while the host is disconnected or congested.
+  Serial.setTxTimeoutMs(0);
+#endif
   pinMode(BUTTON_PIN,INPUT_PULLUP);
   if(!config.valid() || !validCa(config.ca)) {startupFault="FAULT: check local config or CA";status(startupFault);return;}
   if(!storage.begin() || counter.load()!=DurableCounter::Result::Ok) {startupFault="FAULT: NVS load failed; do not erase";status(startupFault);return;}
