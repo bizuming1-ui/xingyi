@@ -39,4 +39,5 @@ try {
  await runSuite(5282,false,'public-pages-demo.mjs');
  await runSuite(5283,true,'device-vault.mjs',false,true);
  await runSuite(5284,true,'device-provision-vault.mjs',false,true);
+ await runSuite(5286,true,'serial-latency.mjs',true,true);
 } finally {rmSync(temp,{recursive:true,force:true});}

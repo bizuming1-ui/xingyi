@@ -68,9 +68,9 @@ export class DeviceDraftData {
 // invalidates late completions from previous runs, including errors. A slow
 // network can exceed the interval: this is not a one-second delivery guarantee.
 export class DeviceMonitor {
-  constructor(data,{interval=500,setTimer=(fn,ms)=>globalThis.setTimeout(fn,ms),clearTimer=id=>globalThis.clearTimeout(id)}={}) {
+  constructor(data,{interval=500,setTimer=(fn,ms)=>globalThis.setTimeout(fn,ms),clearTimer=id=>globalThis.clearTimeout(id),now=()=>globalThis.performance.now()}={}) {
     if(!Number.isFinite(interval) || interval<200)throw new Error('刷新间隔无效。');
-    this.data=data;this.interval=interval;this.setTimer=setTimer;this.clearTimer=clearTimer;this.generation=0;this.timer=null;
+    this.data=data;this.interval=interval;this.setTimer=setTimer;this.clearTimer=clearTimer;this.now=now;this.generation=0;this.timer=null;
   }
   start(orderId,onUpdate) {
     if(!uuid(orderId) || typeof onUpdate!=='function')throw new Error('设备监控参数无效。');
@@ -78,8 +78,8 @@ export class DeviceMonitor {
     const poll=async()=>{
       if(this.generation!==generation)return;
       this.timer=null;
-      let event;
-      try {event={type:'snapshot',snapshot:await this.data.load(orderId)};}
+      let event;const startedAt=this.now();
+      try {event={type:'snapshot',snapshot:await this.data.load(orderId),startedAt};}
       catch {event={type:'error',message:'设备数据刷新失败，请检查网络。'};}
       if(this.generation!==generation)return;
       onUpdate(event);
