@@ -35,9 +35,9 @@ try {
   if(expected==='accepted')assert.equal(result.value.split(' ')[1],signed.unix_seconds);else assert.equal(result.value.split(' ')[1],'42');
   assert.equal(await exit,0);
  }
- await check();await check({mode:'wrap'});await check({mode:'late',expected:'rejected'});
+ await check();await check({mode:'wrap'});await check({mode:'slow'});await check({mode:'late',expected:'rejected'});
  await check({deviceId:'33333333-3333-4333-8333-333333333333',expected:'rejected'});
- await check({deviceSecret:'f'.repeat(64),expected:'rejected'});
+ await check({deviceSecret:'f'.repeat(64),expected:'rejected'});await check({mode:'slow',deviceSecret:'f'.repeat(64),expected:'rejected'});
  await check({signedNonce:'f'.repeat(64),expected:'rejected'});
  await check({alter:p=>({...p,tag:(p.tag[0]==='a'?'b':'a')+p.tag.slice(1)}),expected:'rejected'});
  await check({alter:p=>({...p,unix_seconds:String(Number(p.unix_seconds)+1)}),expected:'rejected'});

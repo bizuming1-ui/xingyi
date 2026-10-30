@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include "TimeProofLimits.h"
 
 // A boot-local monotonic counter that cannot wrap during the configured trust
 // lifetime. Implementations must return false on any detected clock fault; a
@@ -35,7 +36,7 @@ class TrustedTimeWindow {
     invalidate();
     if(!lifetime_ || lifetime_>MAX_LIFETIME_MS || driftPpm_>MAX_DRIFT_PPM ||
        serverSeconds<MIN_EPOCH || serverSeconds>MAX_EPOCH ||
-       responseReceivedMs<requestStartedMs || responseReceivedMs-requestStartedMs>=5000)return false;
+       responseReceivedMs<requestStartedMs || responseReceivedMs-requestStartedMs>=TimeProofLimits::MAX_ROUND_TRIP_MS)return false;
     uint64_t now=0;
     if(!clock_.read(now) || now<responseReceivedMs || now-responseReceivedMs>=lifetime_)return false;
     const uint64_t trip=responseReceivedMs-requestStartedMs+1; // ms quantization can hide <1ms

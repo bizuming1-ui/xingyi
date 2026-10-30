@@ -29,9 +29,12 @@ constexpr int BUTTON_PIN=4;
 constexpr uint32_t NETWORK_TIMEOUT_MS=3000;
 // Experimental longer budget for status and count upload only.
 constexpr uint32_t DATA_RPC_TIMEOUT_MS=8000;
-// Only for initial authenticated time; remains below the 5s proof limit.
+// Proactive and first recovery attempts stay short. If hard recovery times
+// out, allow the next authenticated proof more time on slow links. This can
+// delay network work but never permits an expired time window or lease.
 constexpr uint32_t TIME_BOOTSTRAP_TIMEOUT_MS=4500;
-static_assert(TIME_BOOTSTRAP_TIMEOUT_MS < TimeProof::MAX_ROUND_TRIP_MS,"proof timeout must remain bounded");
+constexpr uint32_t TIME_RECOVERY_TIMEOUT_MS=11000;
+static_assert(TIME_RECOVERY_TIMEOUT_MS < TimeProof::MAX_ROUND_TRIP_MS,"proof timeout must remain bounded");
 constexpr uint32_t NETWORK_STACK_BYTES=24576;
 constexpr uint32_t STATUS_INTERVAL_MS=1000;
 RuntimeConfig config{WIFI_SSID,WIFI_PASSWORD,SUPABASE_HOST,SUPABASE_PUBLISHABLE_KEY,
@@ -56,7 +59,7 @@ HttpRpcExchange* networkExchange=nullptr;
 std::atomic<bool> stopNetwork{false};
 std::atomic<bool> radioOnline{false},timeTrusted{false};
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
-std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0};
+std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0},timeBudget{0};
 std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0},rpcReuse{0};
 std::atomic<int> barrierRpcKind{0},barrierRpcResult{1},barrierRpcStage{0},barrierRpcNet{1},barrierRpcHttp{0},barrierRpcReuse{0};
 // The network task only enqueues numeric events with zero wait. Serial output
@@ -120,6 +123,7 @@ void networkTask(void*) {
     const bool online=networkWifi->state()==WifiSupervisor::State::Online;
     radioOnline.store(online,std::memory_order_relaxed);
     timeTrusted.store(online && networkTime->trusted(),std::memory_order_relaxed);
+    timeBudget.store(networkTime->lastBudget(),std::memory_order_relaxed);
     timeStage.store(networkTime->lastStage(),std::memory_order_relaxed);
     timeResult.store(networkTime->lastResult(),std::memory_order_relaxed);
     timeDetail.store(networkTime->lastDetail(),std::memory_order_relaxed);
@@ -184,7 +188,7 @@ void setup() {
   static SyncNetworkWorker worker(mailbox,exchange,config.secret,&monitor);
   static TimeProof proof(networkEntropy);static TimeBootstrapExchange bootstrap(clock,scheduler,tcp,resolved,proof);
   static TimeWindowSynchronizer sync(monotonic,window,bootstrap);
-  static AuthenticatedNetworkTime time(window,sync,config.host,config.key,config.ca,config.deviceId,config.secret,TIME_BOOTSTRAP_TIMEOUT_MS);
+  static AuthenticatedNetworkTime time(window,sync,config.host,config.key,config.ca,config.deviceId,config.secret,TIME_BOOTSTRAP_TIMEOUT_MS,TIME_RECOVERY_TIMEOUT_MS);
   static NetworkTaskCoordinator coordinator(clock,wifi,time,worker);
   controller=&countController;countPlanner=&planner;input=&button;network=&coordinator;networkWifi=&wifi;networkTime=&time;networkWorker=&worker;networkExchange=&exchange;
   if(controller->faulted()) {startupFault="FAULT: initial state invalid";status(startupFault);return;}
@@ -235,7 +239,7 @@ void loop() {
   // Offset from the main status line so a small serial buffer can drain.
   if(radioOnline.load() && !timeTrusted.load() && now-lastDiagnostic>=5000 && now-lastStatus>=400 && now-lastStatus<600) {
     lastDiagnostic=now;char diag[64];
-    snprintf(diag,sizeof(diag),"TIME_DIAG stage=%d result=%d code=%d",timeStage.load(),timeResult.load(),timeDetail.load());
+    snprintf(diag,sizeof(diag),"TIME_DIAG stage=%d result=%d code=%d budget=%lu",timeStage.load(),timeResult.load(),timeDetail.load(),static_cast<unsigned long>(timeBudget.load()));
     status(diag);
   }
   if(radioOnline.load() && !timeTrusted.load() && now-lastTlsIo>=5000 && now-lastStatus>=700 && now-lastStatus<900) {

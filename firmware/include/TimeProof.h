@@ -1,5 +1,6 @@
 #pragma once
 #include "RandomEpochSource.h"
+#include "TimeProofLimits.h"
 #include <mbedtls/md.h>
 #include <mbedtls/sha256.h>
 #include <stdint.h>
@@ -15,7 +16,7 @@
 // Entropy and Wi-Fi lifecycle must be protected as for RandomEpochSource.
 class TimeProof {
  public:
-  static constexpr uint32_t MAX_ROUND_TRIP_MS=5000;
+  static constexpr uint32_t MAX_ROUND_TRIP_MS=TimeProofLimits::MAX_ROUND_TRIP_MS;
   explicit TimeProof(SecureEntropy& entropy):entropy_(entropy){}
   ~TimeProof(){clear();}
   TimeProof(const TimeProof&)=delete;

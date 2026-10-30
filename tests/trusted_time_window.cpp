@@ -15,7 +15,7 @@ int main(){
  clock.now=12099;assert(t.bounds(bounds));clock.now=12100;assert(!t.bounds(bounds));
  clock.now=20000;assert(t.acceptVerified(epoch,19000,20000));clock.now=19999;assert(!t.bounds(bounds));
  clock.now=20000;assert(t.acceptVerified(epoch,19000,20000));clock.good=false;assert(!t.bounds(bounds));clock.good=true;assert(!t.bounds(bounds));
- assert(!t.acceptVerified(epoch,15000,20000));assert(!t.bounds(bounds));
+ assert(!t.acceptVerified(epoch,8000,20000));assert(!t.bounds(bounds));
  assert(!t.acceptVerified(epoch,20000,19999));assert(!t.acceptVerified(1,19000,20000));
  TrustedTimeWindow zero(clock,0,0),tooLong(clock,86400001,0),badDrift(clock,1000,10000);
  assert(!zero.acceptVerified(epoch,19000,20000) && !tooLong.acceptVerified(epoch,19000,20000) && !badDrift.acceptVerified(epoch,19000,20000));
@@ -36,12 +36,16 @@ int main(){
  assert(!renewing.replaceVerified(1,169900,170000));assert(!renewing.bounds(bounds));
  renewClock.now=200000;assert(renewing.acceptVerified(epoch,199900,200000));
  renewClock.now=199999;assert(!renewing.replaceVerified(epoch,199000,199999));assert(!renewing.bounds(bounds));
+ // A slow, valid proof widens the uncertainty interval by its full trip.
+ clock.now=25000;assert(t.acceptVerified(epoch,14000,25000));assert(t.bounds(bounds));
+ assert(bounds.latestMs>=epoch*1000+12000);
+ clock.now=26000;assert(!t.acceptVerified(epoch,14000,26000));
  // Deterministic simulation of signed second rounding, ms quantization, path
  // delay and a range of fast/slow monotonic clocks under the declared bound.
  std::mt19937 rng(42);
  for(unsigned i=0;i<20000;++i){
   const double start=1000.0+(rng()%1000)/1000.0;
-  const double trip=1.0+(rng()%4000000)/1000.0;
+  const double trip=1.0+(rng()%11900000)/1000.0;
   const double server=start+trip*(rng()%1001)/1000.0;
   const double end=start+trip;
   const double observation=end+(rng()%9000000)/1000.0;

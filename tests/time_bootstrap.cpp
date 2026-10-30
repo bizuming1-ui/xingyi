@@ -84,13 +84,21 @@ int main(int argc,char** argv){
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,200,seconds)==R::Timeout && seconds==42);
  assert(bootstrap.lastStage()==TimeBootstrapExchange::Stage::Receive);
  assert(tcp.state()==NonblockingTcp::State::Idle && !proof.nonce());
- // Same delayed response: 3s total rejects, 4.5s accepts while still keeping
- // the authenticated proof's 5s upper bound and the validated time window.
+ // Same delayed response: 3s total rejects, 4.5s accepts with a validated window.
  entropy.pattern=0x12;
  assert(bootstrap.fetch("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000,seconds)==R::Timeout);
  assert(bootstrap.lastStage()==TimeBootstrapExchange::Stage::Receive);
  assert(bootstrap.lastTxBytes()>0 && bootstrap.lastRxBytes()>0);
  assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,4500)==R::Ok);
  assert(window.bounds(bounds) && sync.lastStage()==TimeBootstrapExchange::Stage::Complete);
+ // Simulate a link whose time response takes over 5 seconds: the first hard
+ // recovery times out, then the longer retry accepts only a valid signed proof.
+ // Its uncertainty interval includes the full duration, not just server time.
+ entropy.pattern=0x13;
+ AuthenticatedNetworkTime recovery(window,sync,"project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,4500,10000);
+ assert(!recovery.refresh() && recovery.lastResult()==static_cast<int>(R::Timeout));
+ assert(!recovery.trusted() && recovery.lastBudget()==4500);
+ assert(recovery.refresh() && recovery.trusted() && recovery.lastBudget()==10000);
+ assert(window.bounds(bounds) && bounds.latestMs-bounds.earliestMs>=6200);
  std::cout<<"time-only bootstrap: date exception, CA/host checks, proof and timeout passed\n";
 }

@@ -9,8 +9,8 @@
 #include <thread>
 struct Clock : ConnectionClock,MonotonicMillis64 {
  std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
- uint32_t nowMillis() override{return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count()+10000);}
- bool read(uint64_t& out) override{out=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count()+10000);return true;}
+ uint32_t nowMillis() override{return static_cast<uint32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count()+20000);}
+ bool read(uint64_t& out) override{out=static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now()-start).count()+20000);return true;}
 };
 struct Yield : NetworkYield {void yield() override {std::this_thread::sleep_for(std::chrono::milliseconds(1));}};
 struct Dns : AsyncDnsBackend {int calls=0;bool start(Request* r) override {++calls;const uint8_t ip[]={127,0,0,1};r->complete(r->context,ip);return true;}};
@@ -53,6 +53,9 @@ int main(int argc,char** argv) {
  assert(window.acceptVerified(notBefore-1,stamp-4000,stamp));
  assert(exchange.post("device_status","{}",2,response,sizeof(response)).status==RpcExchange::Status::NetworkError);
  assert(clock.read(stamp));assert(window.acceptVerified(notAfter-1,stamp-4000,stamp));
+ assert(exchange.post("device_status","{}",2,response,sizeof(response)).status==RpcExchange::Status::NetworkError);
+ // Longer proof delays must widen the interval, not weaken certificate dates.
+ assert(clock.read(stamp) && stamp>=11000);assert(window.acceptVerified(notAfter-5,stamp-11000,stamp));
  assert(exchange.post("device_status","{}",2,response,sizeof(response)).status==RpcExchange::Status::NetworkError);
  setTime(current);
  HttpRpcExchange wrongHost(channel,"wrong.supabase.co","sb_publishable_test",3000);
