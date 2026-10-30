@@ -32,6 +32,7 @@ constexpr uint32_t DATA_RPC_TIMEOUT_MS=8000;
 constexpr uint32_t TIME_BOOTSTRAP_TIMEOUT_MS=4500;
 static_assert(TIME_BOOTSTRAP_TIMEOUT_MS < TimeProof::MAX_ROUND_TRIP_MS,"proof timeout must remain bounded");
 constexpr uint32_t NETWORK_STACK_BYTES=24576;
+constexpr uint32_t STATUS_INTERVAL_MS=1000;
 RuntimeConfig config{WIFI_SSID,WIFI_PASSWORD,SUPABASE_HOST,SUPABASE_PUBLISHABLE_KEY,
  DEVICE_ID,DEVICE_SECRET,SUPABASE_CA_PEM,TIME_LIFETIME_MS,CLOCK_DRIFT_PPM};
 class Clock final : public ConnectionClock, public NetworkTaskClock {
@@ -152,7 +153,7 @@ void loop() {
   if(changed) {
     priorStatus=sample.status;lastStatus=now;
     status(controller->faulted()?"FAULT: sync stopped; do not erase NVS":statusName(sample.status));
-  } else if(now-lastStatus>=5000) {
+  } else if(now-lastStatus>=STATUS_INTERVAL_MS) {
     lastStatus=now;
     if(controller->faulted()) status("FAULT: sync stopped; do not erase NVS");
     else {
@@ -163,17 +164,17 @@ void loop() {
   }
   // Emit only numeric failure stage/result/detail, never credentials or data.
   // Offset from the main status line so a small serial buffer can drain.
-  if(radioOnline.load() && !timeTrusted.load() && now-lastDiagnostic>=5000 && now-lastStatus>=2000) {
+  if(radioOnline.load() && !timeTrusted.load() && now-lastDiagnostic>=5000 && now-lastStatus>=400 && now-lastStatus<600) {
     lastDiagnostic=now;char diag[64];
     snprintf(diag,sizeof(diag),"TIME_DIAG stage=%d result=%d code=%d",timeStage.load(),timeResult.load(),timeDetail.load());
     status(diag);
   }
-  if(radioOnline.load() && !timeTrusted.load() && now-lastTlsIo>=5000 && now-lastStatus>=3200 && now-lastDiagnostic>=1000) {
+  if(radioOnline.load() && !timeTrusted.load() && now-lastTlsIo>=5000 && now-lastStatus>=700 && now-lastStatus<900) {
     lastTlsIo=now;char info[64];
     snprintf(info,sizeof(info),"TLS_IO start=%lu tx=%lu rx=%lu",static_cast<unsigned long>(timeStart.load()),static_cast<unsigned long>(timeTx.load()),static_cast<unsigned long>(timeRx.load()));
     status(info);
   }
-  if(!counter.isReady() && radioOnline.load() && now-lastRpcDiag>=5000 && now-lastStatus>=1100 && now-lastStatus<1700) {
+  if(!counter.isReady() && radioOnline.load() && now-lastRpcDiag>=5000 && now-lastStatus>=150 && now-lastStatus<300) {
     lastRpcDiag=now;char info[64];
     snprintf(info,sizeof(info),"RPC_DIAG k=%d r=%d s=%d n=%d h=%d",rpcKind.load(),rpcResult.load(),rpcStage.load(),rpcNet.load(),rpcHttp.load());
     status(info);
