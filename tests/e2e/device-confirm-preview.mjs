@@ -36,8 +36,14 @@ async function setup(size,{noLocks=false,existing=false}={}) {
  });
  await page.addInitScript(s=>localStorage.setItem('sb-example-auth-token',JSON.stringify(s)),session);
  if(noLocks)await page.addInitScript(()=>Object.defineProperty(navigator,'locks',{value:undefined}));
- await page.goto(origin);await page.getByRole('button',{name:/TEST-ORDER/}).click();await page.getByRole('button',{name:'设备预览'}).click();await page.getByText('设备待确认数').waitFor();
- await page.getByRole('button',{name:'设备确认（测试）'}).click();
+ await page.goto(origin);await page.getByRole('button',{name:/TEST-ORDER/}).click();
+ if(await page.getByLabel('现在（设备待确认数）').count()) {
+  await page.waitForFunction(()=>document.querySelector('[aria-label="现在（设备待确认数）"]')?.value==='7');
+  await page.getByRole('button',{name:'设备确认（测试）'}).click();
+ } else {
+  await page.getByRole('button',{name:'设备预览'}).click();await page.getByText('设备待确认数').waitFor();
+  await page.getByRole('button',{name:'设备确认（测试）'}).click();
+ }
  if(noLocks)await page.getByText(/不支持安全的多标签页协调/).waitFor();
  else if(existing)await page.getByRole('button',{name:'恢复未结束请求'}).waitFor();
  else await page.getByRole('button',{name:'开始设备确认'}).waitFor();

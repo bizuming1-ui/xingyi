@@ -30,6 +30,7 @@ try {
  await runSuite(5174,false,'pr1-regression.mjs');
  await runSuite(5175,true,'device-preview.mjs');
  await runSuite(5176,true,'device-confirm-preview.mjs',true);
+ await runSuite(5285,true,'device-confirm-preview.mjs',true,true);
  await runSuite(5277,false,'device-download.mjs');
  await runSuite(5278,true,'device-provision-preview.mjs');
  await runSuite(5279,true,'first-setup-preview.mjs',false,true);

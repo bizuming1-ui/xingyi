@@ -16,3 +16,5 @@
 .test-device-canvas .fields{row-gap:clamp(10px,5vh,45px)}
 @media(max-width:760px){.test-device-canvas .fields{gap:clamp(4px,1.2vh,12px);margin-top:clamp(55px,12vh,100px)}.test-device-canvas .field input{height:clamp(34px,5.5vh,46px)}}
 @media(max-height:500px) and (orientation:landscape){.test-device-canvas .fields{margin:0;row-gap:5px}}
+
+@media(max-width:760px){.test-device-canvas .canvas-footer{left:8px;right:8px;justify-content:flex-end;gap:1px}.test-device-canvas .canvas-footer .text-btn{font-size:12px;padding:6px 3px}.test-device-canvas .canvas-footer button[form]{width:85px;font-size:16px}}
