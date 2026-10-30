@@ -2886,7 +2886,7 @@ void loop() {
     }
     else {
       char info[64];
-      snprintf(info,sizeof(info),"WIFI=%d TIME=%d BOUND=%d PENDING=%llu",radioOnline.load()?1:0,timeTrusted.load()?1:0,counter.isReady()?1:0,static_cast<unsigned long long>(counter.pending()));
+      snprintf(info,sizeof(info),"WIFI=%d TIME=%d BOUND=%d PENDING=%llu t=%lu",radioOnline.load()?1:0,timeTrusted.load()?1:0,counter.isReady()?1:0,static_cast<unsigned long long>(counter.pending()),static_cast<unsigned long>(now));
       status(info);
     }
   }
@@ -2894,7 +2894,7 @@ void loop() {
   rpcMonitor->drain();
   static uint32_t lastMonitorNotice=0;
   if(now-lastMonitorNotice>=15000) {
-    char info[64];snprintf(info,sizeof(info),"MON v=1 lost=%lu",static_cast<unsigned long>(rpcMonitor->lost()));
+    char info[64];snprintf(info,sizeof(info),"MON v=1 t=%lu lost=%lu",static_cast<unsigned long>(now),static_cast<unsigned long>(rpcMonitor->lost()));
     status(info);lastMonitorNotice=now;
   }
   // A local counter update is informative only: it is NOT the server draft.
@@ -3071,7 +3071,7 @@ t 是开机以来毫秒数，total 是当前本地绑定/epoch 的累计数，�
   上传是否被本地状态机确认仍需查看 PENDING 和故障状态，是否实际累计须核对
   网页/服务端。
 
-每约 15 秒尽力输出 \`MON v=1 lost=...\`，lost 是本次启动中诊断队列满或
+每约 15 秒尽力输出 \`MON v=1 t=... lost=...\`，t 是开机毫秒，lost 是本次启动中诊断队列满或
 格式失败丢弃的事件数；序号可能回绕或重启后重置，毫秒数约 49.7 天回绕。
 输出经过固定容量队列并且不等待串口，不改变计数、网络、冻结或确认；
 串口未连接、缓冲区不足、监视器开启太晚、重启等都可能缺失记录，lost=0

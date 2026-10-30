@@ -214,7 +214,7 @@ void loop() {
     }
     else {
       char info[64];
-      snprintf(info,sizeof(info),"WIFI=%d TIME=%d BOUND=%d PENDING=%llu",radioOnline.load()?1:0,timeTrusted.load()?1:0,counter.isReady()?1:0,static_cast<unsigned long long>(counter.pending()));
+      snprintf(info,sizeof(info),"WIFI=%d TIME=%d BOUND=%d PENDING=%llu t=%lu",radioOnline.load()?1:0,timeTrusted.load()?1:0,counter.isReady()?1:0,static_cast<unsigned long long>(counter.pending()),static_cast<unsigned long>(now));
       status(info);
     }
   }
@@ -222,7 +222,7 @@ void loop() {
   rpcMonitor->drain();
   static uint32_t lastMonitorNotice=0;
   if(now-lastMonitorNotice>=15000) {
-    char info[64];snprintf(info,sizeof(info),"MON v=1 lost=%lu",static_cast<unsigned long>(rpcMonitor->lost()));
+    char info[64];snprintf(info,sizeof(info),"MON v=1 t=%lu lost=%lu",static_cast<unsigned long>(now),static_cast<unsigned long>(rpcMonitor->lost()));
     status(info);lastMonitorNotice=now;
   }
   // A local counter update is informative only: it is NOT the server draft.
