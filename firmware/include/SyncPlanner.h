@@ -57,6 +57,8 @@ class SyncPlanner {
   }
   bool faulted() const { return fault_; }
   bool hasInFlight() const { return inFlight_.kind!=Kind::None; }
+  Kind diagnosticInFlight() const {return inFlight_.kind;}
+  BarrierState diagnosticBarrier() const {return remoteBarrier_;}
 
   // Commands execute outside this class. The caller must keep sampling GPIO
   // during network delays, serialize access to the counter, and enforce a
