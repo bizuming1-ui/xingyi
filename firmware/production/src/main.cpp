@@ -5,6 +5,8 @@
 #include <Preferences.h>
 #include <WiFi.h>
 #include <mbedtls/x509_crt.h>
+#include <esp_system.h>
+#include <esp_attr.h>
 #include <atomic>
 #include "config.local.h"
 #include "RuntimeConfig.h"
@@ -24,6 +26,7 @@
 #include "AuthenticatedNetworkTime.h"
 #include "MonitorEvent.h"
 #include "BestEffortSerial.h"
+#include "ProgressWatchdog.h"
 
 namespace {
 constexpr int BUTTON_PIN=4;
@@ -37,6 +40,7 @@ constexpr uint32_t TIME_BOOTSTRAP_TIMEOUT_MS=4500;
 constexpr uint32_t TIME_RECOVERY_TIMEOUT_MS=11000;
 static_assert(TIME_RECOVERY_TIMEOUT_MS < TimeProof::MAX_ROUND_TRIP_MS,"proof timeout must remain bounded");
 constexpr uint32_t NETWORK_STACK_BYTES=24576;
+constexpr uint32_t WATCHDOG_STACK_BYTES=4096;
 constexpr uint32_t STATUS_INTERVAL_MS=1000;
 RuntimeConfig config{WIFI_SSID,WIFI_PASSWORD,SUPABASE_HOST,SUPABASE_PUBLISHABLE_KEY,
  DEVICE_ID,DEVICE_SECRET,SUPABASE_CA_PEM,TIME_LIFETIME_MS,CLOCK_DRIFT_PPM};
@@ -58,6 +62,12 @@ AuthenticatedNetworkTime* networkTime=nullptr;
 SyncNetworkWorker* networkWorker=nullptr;
 HttpRpcExchange* networkExchange=nullptr;
 std::atomic<bool> stopNetwork{false};
+std::atomic<bool> watchdogEnabled{false},watchdogHold{false};
+std::atomic<uint32_t> countProgress{0},networkProgress{0};
+// Retained across software reset only on supported ESP32-S3 hardware. Never
+// stored in counter NVS; brownouts/power loss need not preserve this budget.
+RTC_NOINIT_ATTR WatchdogRestartBudget::Record watchdogHistory;
+WatchdogRestartBudget watchdogBudget(watchdogHistory);
 std::atomic<bool> radioOnline{false},timeTrusted{false};
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0},timeBudget{0};
@@ -119,7 +129,9 @@ bool validCa(const char* pem) {
 }
 void networkTask(void*) {
   while(!stopNetwork.load(std::memory_order_acquire)) {
+    networkProgress.store(millis(),std::memory_order_relaxed);
     network->step();
+    networkProgress.store(millis(),std::memory_order_relaxed);
     // Updates are informational only; they cannot prove a live freeze lease.
     const bool online=networkWifi->state()==WifiSupervisor::State::Online;
     radioOnline.store(online,std::memory_order_relaxed);
@@ -149,6 +161,35 @@ void networkTask(void*) {
   }
   networkWorker->closeConnection();
   vTaskDelete(nullptr);
+}
+// Software supervisor on an independent FreeRTOS task. It does not assume a
+// lost connection or a 4.5/11/8s timeout is a hung task. It cannot recover a
+// scheduler-wide halt, failed power, or an unavailable external service.
+void watchdogTask(void*) {
+  ProgressWatchdog policy;
+  for(;;) {
+    const bool active=watchdogEnabled.load(std::memory_order_acquire) && !stopNetwork.load(std::memory_order_acquire);
+    // Load progress before reading the clock: a newer concurrent heartbeat
+    // must not appear as a huge unsigned elapsed time.
+    const uint32_t count=countProgress.load(std::memory_order_relaxed);
+    const uint32_t net=networkProgress.load(std::memory_order_relaxed);
+    const uint32_t now=millis();
+    const bool healthy=active && static_cast<uint32_t>(now-count)<5000 && static_cast<uint32_t>(now-net)<30000;
+    watchdogBudget.observe(now,healthy);
+    const bool available=watchdogBudget.available();
+    watchdogHold.store(active && !available,std::memory_order_relaxed);
+    const bool pressed=digitalRead(BUTTON_PIN)==LOW;
+    if(policy.step(now,count,net,active,pressed,available)==ProgressWatchdog::Action::Restart) {
+      const uint32_t latestCount=countProgress.load(std::memory_order_relaxed);
+      const uint32_t latestNet=networkProgress.load(std::memory_order_relaxed);
+      const uint32_t checkNow=millis();
+      const bool stillStalled=static_cast<uint32_t>(checkNow-latestCount)>=ProgressWatchdog::STALL_MS ||
+                              static_cast<uint32_t>(checkNow-latestNet)>=ProgressWatchdog::STALL_MS;
+      if(stillStalled && !stopNetwork.load(std::memory_order_acquire) && digitalRead(BUTTON_PIN)!=LOW && watchdogBudget.reserve())
+        esp_restart(); // retained counter and freeze journal are never erased
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
 }
 const char* statusName(DeviceInput::Status s) {
   switch(s) {
@@ -198,11 +239,19 @@ void setup() {
   static NetworkTaskCoordinator coordinator(clock,wifi,time,worker);
   controller=&countController;countPlanner=&planner;input=&button;network=&coordinator;networkWifi=&wifi;networkTime=&time;networkWorker=&worker;networkExchange=&exchange;
   if(controller->faulted()) {startupFault="FAULT: initial state invalid";status(startupFault);return;}
+  watchdogBudget.begin(esp_reset_reason()==ESP_RST_SW);
+  TaskHandle_t guardHandle=nullptr;
+  if(xTaskCreate(watchdogTask,"xingyi-watch",WATCHDOG_STACK_BYTES,nullptr,2,&guardHandle)!=pdPASS || !guardHandle) {
+    startupFault="FAULT: watchdog task unavailable";status(startupFault);return;
+  }
   TaskHandle_t handle=nullptr;
   if(xTaskCreatePinnedToCore(networkTask,"xingyi-net",NETWORK_STACK_BYTES,nullptr,1,&handle,0)!=pdPASS || !handle) {
     startupFault="FAULT: network task unavailable";status(startupFault);return;
   }
   initialized=true;lastCountTotal=counter.state().total;
+  countProgress.store(millis(),std::memory_order_relaxed);
+  networkProgress.store(millis(),std::memory_order_relaxed);
+  watchdogEnabled.store(true,std::memory_order_release);
   status("Test candidate started; do not use in production");
 }
 void loop() {
@@ -218,6 +267,7 @@ void loop() {
     status(controller->faulted()?"FAULT: sync stopped; do not erase NVS":statusName(sample.status));
   } else if(now-lastStatus>=STATUS_INTERVAL_MS) {
     lastStatus=now;
+    if(watchdogHold.load(std::memory_order_relaxed))status("WATCHDOG: restart limit reached");
     if(controller->faulted()) {
       char info[64];snprintf(info,sizeof(info),"FAULT_DIAG planner=%d controller=%d",static_cast<int>(countPlanner->faultReason()),controller->diagnosticFault());status(info);
       status("FAULT: sync stopped; do not erase NVS");
@@ -268,5 +318,6 @@ void loop() {
     snprintf(info,sizeof(info),"BAR_RPC k=%d r=%d s=%d n=%d h=%d u=%d",barrierRpcKind.load(),barrierRpcResult.load(),barrierRpcStage.load(),barrierRpcNet.load(),barrierRpcHttp.load(),barrierRpcReuse.load());
     status(info);
   }
+  countProgress.store(millis(),std::memory_order_relaxed);
   delay(1);
 }
