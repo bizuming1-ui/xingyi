@@ -31,6 +31,23 @@ SyncPlanner::Reply status(const char* order,const char* binding,uint64_t revisio
 SyncPlanner::Reply accepted(uint64_t total) {SyncPlanner::Reply r{};r.success=true;r.acceptedTotal=total;return r;}
 SyncPlanner::Reply frozen(B state){SyncPlanner::Reply r{};r.success=true;r.barrierState=state;if(state==B::Ready)copy(r.nonce,nonce);return r;}
 int main(){
+ // A successful slow status response must be acted on even when it took
+ // longer than the poll interval; previously each result triggered a new poll.
+ Store slowStore;DurableCounter slowCounter(slowStore);assert(slowCounter.load()==R::Ok);
+ Epochs slowEpochs;SyncPlanner slow(slowCounter,slowEpochs);
+ auto slowCmd=slow.next(0);assert(slowCmd.kind==K::Poll);
+ assert(slow.complete(slowCmd.ticket,status(order1,binding1,1),1800));
+ slowCmd=slow.next(1800);assert(slowCmd.kind==K::Upload && slowCounter.isReady());
+ assert(slow.complete(slowCmd.ticket,accepted(0),3600));
+ assert(slow.count(1)==R::Ok);
+ slowCmd=slow.next(3600);assert(slowCmd.kind==K::Poll);
+ assert(slow.complete(slowCmd.ticket,status(order1,binding1,1),5400));
+ slowCmd=slow.next(5400);assert(slowCmd.kind==K::Upload && slowCmd.total==1);
+ assert(slow.complete(slowCmd.ticket,accepted(1),7200) && slowCounter.pending()==0);
+ slowCmd=slow.next(7200);assert(slowCmd.kind==K::Poll);
+ assert(slow.complete(slowCmd.ticket,status(order1,binding1,1,B::Requested),9000));
+ slowCmd=slow.next(9000);assert(slowCmd.kind==K::Freeze && slowCounter.isFrozen());
+ assert(slow.complete(slowCmd.ticket,frozen(B::Ready),10800));
  Store coldStore; DurableCounter unloaded(coldStore); Epochs coldEpochs; SyncPlanner beforeLoad(unloaded,coldEpochs);
  assert(beforeLoad.faulted() && beforeLoad.next(0).kind==K::None);
  Store store;DurableCounter c(store);assert(c.load()==R::Ok);Epochs epochs;SyncPlanner p(c,epochs);

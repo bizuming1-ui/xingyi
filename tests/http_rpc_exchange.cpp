@@ -21,6 +21,7 @@ int main(){
   SyncPlanner::Command cmd{};cmd.kind=SyncPlanner::Kind::Poll;SyncPlanner::Reply reply{};
   auto outcome=RpcWorker::execute(exchange,cmd,secret,reply);
   assert(outcome.result==RpcWorker::Result::Ok && reply.success && socket.closes==1);
+  assert(exchange.lastStage()==HttpRpcExchange::Stage::Complete && exchange.lastStatus()==RpcExchange::Status::Ok && exchange.lastHttpStatus()==200);
   assert(socket.sent.find("POST /rest/v1/rpc/device_status HTTP/1.1\r\nHost: project123.supabase.co\r\napikey: sb_publishable_public-key\r\n") == 0);
   assert(socket.sent.find("Authorization:")==std::string::npos);
   assert(socket.sent.find(secret)>socket.sent.find("\r\n\r\n"));
@@ -33,6 +34,7 @@ int main(){
   HttpRpcExchange correct(invalid,"project123.supabase.co",key,1000);
   assert(correct.post("../device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::NetworkError && invalid.connects==0);
   invalid.failConnect=true;assert(correct.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::NetworkError && invalid.closes==1);
+  assert(correct.lastStage()==HttpRpcExchange::Stage::Connect && correct.lastStatus()==RpcExchange::Status::NetworkError && correct.lastHttpStatus()==0);
   FakeTls redirect;redirect.incoming="HTTP/1.1 302 Found\r\nLocation: https://evil.example/\r\nContent-Length: 0\r\n\r\n";
   HttpRpcExchange redirection(redirect,"project123.supabase.co",key,5000);
   outcome=RpcWorker::execute(redirection,cmd,secret,reply);assert(outcome.result==RpcWorker::Result::HttpError && redirect.connects==1 && !reply.success);
@@ -47,5 +49,6 @@ int main(){
   assert(deadline.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Timeout && slow.closes==1);
   FakeTls stalled;stalled.timeoutRead=true;HttpRpcExchange timeout(stalled,"project123.supabase.co",key,5000);
   assert(timeout.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Timeout && stalled.closes==1);
+  assert(timeout.lastStage()==HttpRpcExchange::Stage::Receive && timeout.lastStatus()==RpcExchange::Status::Timeout);
   std::cout<<"HTTP RPC exchange tests passed\n";
 }

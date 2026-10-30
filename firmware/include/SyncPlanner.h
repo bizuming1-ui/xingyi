@@ -72,7 +72,11 @@ class SyncPlanner {
       if (remoteBarrier_==BarrierState::Ready && uuid(nonce_) && (!renewed_ || elapsed(now,lastRenew_)>=750)) return issue(Kind::Renew,now);
       return {};
     }
-    if (!polled_ || elapsed(now,lastPoll_)>=500) return issue(Kind::Poll,now);
+    // A slow poll can take longer than the polling interval. Give its result
+    // one scheduling opportunity before polling again, or binding/uploads may
+    // be permanently starved on a real network.
+    const bool justPolled=pollJustCompleted_;pollJustCompleted_=false;
+    if (!polled_ || (!justPolled && elapsed(now,lastPoll_)>=500)) return issue(Kind::Poll,now);
     if (counter_.isReady() && (!streamRegistered_ || counter_.pending()>0)) return issue(Kind::Upload,now);
     if (uuid(desiredBinding_) && uuid(desiredOrder_) && desiredRevision_>0) {
       const auto& s=counter_.state();
@@ -121,7 +125,7 @@ class SyncPlanner {
           // Server says it is frozen, but local journal does not: never guess.
           fault_=true;
         } else { copy(barrier_,reply.barrier); remoteBarrier_=reply.barrierState; }
-        polled_=true; break;
+        polled_=true;pollJustCompleted_=true; break;
       }
       case Kind::Upload: {
         if (reply.acceptedTotal!=sent.total || strcmp(sent.epoch,counter_.state().epochId)!=0 || strcmp(sent.binding,counter_.state().bindingId)!=0) { fault_=true; break; }
@@ -151,7 +155,7 @@ class SyncPlanner {
 
  private:
   DurableCounter& counter_; EpochSource& epochs_;
-  bool fault_=false, sentAny_=false, polled_=false, streamRegistered_=false, needBarrierStatus_=false, renewed_=false, epochAttempted_=false;
+  bool fault_=false, sentAny_=false, polled_=false, pollJustCompleted_=false, streamRegistered_=false, needBarrierStatus_=false, renewed_=false, epochAttempted_=false;
   uint32_t lastSent_=0,lastPoll_=0,lastRenew_=0,lastEpochAttempt_=0,nextTicket_=0;
   uint64_t desiredRevision_=0;
   char desiredOrder_[37]{},desiredBinding_[37]{},barrier_[37]{},nonce_[37]{};

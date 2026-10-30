@@ -21,8 +21,8 @@ struct Mailbox : SyncMailbox {
 struct Exchange : RpcExchange {
  int calls=0;
  Response post(const char* endpoint,const char*,size_t,char* out,size_t cap) override {
-  ++calls;assert(strcmp(endpoint,"device_status")==0);
-  const std::string body="{\"desired_order_id\":\"00000000-0000-4000-8000-000000000001\",\"desired_binding_id\":\"20000000-0000-4000-8000-000000000001\",\"desired_binding_revision\":1}";
+  ++calls;
+  const std::string body=strcmp(endpoint,"device_ingest")==0 ? "{\"binding_id\":\"20000000-0000-4000-8000-000000000001\",\"accepted_total\":7}" :"{\"desired_order_id\":\"00000000-0000-4000-8000-000000000001\",\"desired_binding_id\":\"20000000-0000-4000-8000-000000000001\",\"desired_binding_revision\":1}";
   assert(body.size()<=cap);memcpy(out,body.data(),body.size());Response r{};r.status=Status::Ok;r.httpStatus=200;r.length=body.size();return r;
  }
 };
@@ -56,15 +56,15 @@ int main(){
  counting.step(5210);assert(counter.pending()==7 && !planner.faulted());
  // A successful response blocked by a full result queue remains the exact
  // response, even if Wi-Fi drops; it is not re-executed or replaced by failure.
- counting.step(5700);assert(mailbox.hasCommand && mailbox.command.kind==SyncPlanner::Kind::Poll);
+ counting.step(5700);assert(mailbox.hasCommand && mailbox.command.kind==SyncPlanner::Kind::Upload);
  mailbox.blockPublish=true;clock.now=5700;network.step();assert(exchange.calls==2 && !mailbox.hasResult);
  mailbox.blockPublish=false;station.online=false;clock.now=5701;network.step();
  assert(mailbox.hasResult && mailbox.result.reply.success && exchange.calls==2 && !time.trusted());
- counting.step(5702);assert(counter.pending()==7 && !planner.faulted());
+ counting.step(5702);assert(counter.pending()==0 && !planner.faulted());
  // Busy radio gate makes no Wi-Fi state transition, and no queued RPC is run.
  clock.now=6000;counting.step(6000);assert(mailbox.hasCommand);lock.busy=true;network.step();
  assert(mailbox.hasCommand && exchange.calls==2);lock.busy=false;network.step();
- assert(mailbox.hasResult && !mailbox.result.reply.success && counter.pending()==7);
+ assert(mailbox.hasResult && !mailbox.result.reply.success && counter.pending()==0);
  // Time retry backoff remains correct across the 32-bit clock wrap.
  Lock lock2;Station station2;station2.online=true;WifiSupervisor supervisor2(station2,"network","password");
  GuardedWifiSupervisor wifi2(lock2,supervisor2);Clock clock2;Time time2;Mailbox mailbox2;Exchange exchange2;

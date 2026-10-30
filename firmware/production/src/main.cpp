@@ -46,14 +46,17 @@ DeviceInput* input=nullptr;
 NetworkTaskCoordinator* network=nullptr;
 GuardedWifiSupervisor* networkWifi=nullptr;
 AuthenticatedNetworkTime* networkTime=nullptr;
+SyncNetworkWorker* networkWorker=nullptr;
+HttpRpcExchange* networkExchange=nullptr;
 std::atomic<bool> stopNetwork{false};
 std::atomic<bool> radioOnline{false},timeTrusted{false};
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0};
+std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0};
 bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
-uint32_t lastStatus=0,lastDiagnostic=0,lastTlsIo=0;
+uint32_t lastStatus=0,lastDiagnostic=0,lastTlsIo=0,lastRpcDiag=0;
 
 // Console output is best-effort and never waits for an attached terminal. No
 // secret, SSID, device ID, production-order UUID or request body is printed.
@@ -78,6 +81,11 @@ void networkTask(void*) {
     timeStart.store(networkTime->lastHandshakeStartMs(),std::memory_order_relaxed);
     timeTx.store(networkTime->lastTxBytes(),std::memory_order_relaxed);
     timeRx.store(networkTime->lastRxBytes(),std::memory_order_relaxed);
+    rpcKind.store(static_cast<int>(networkWorker->lastKind()),std::memory_order_relaxed);
+    rpcResult.store(static_cast<int>(networkWorker->lastOutcome().result),std::memory_order_relaxed);
+    rpcStage.store(static_cast<int>(networkExchange->lastStage()),std::memory_order_relaxed);
+    rpcNet.store(static_cast<int>(networkExchange->lastStatus()),std::memory_order_relaxed);
+    rpcHttp.store(networkExchange->lastHttpStatus(),std::memory_order_relaxed);
     vTaskDelay(1);
   }
   vTaskDelete(nullptr);
@@ -122,7 +130,7 @@ void setup() {
   static TimeWindowSynchronizer sync(monotonic,window,bootstrap);
   static AuthenticatedNetworkTime time(window,sync,config.host,config.key,config.ca,config.deviceId,config.secret,TIME_BOOTSTRAP_TIMEOUT_MS);
   static NetworkTaskCoordinator coordinator(clock,wifi,time,worker);
-  controller=&countController;input=&button;network=&coordinator;networkWifi=&wifi;networkTime=&time;
+  controller=&countController;input=&button;network=&coordinator;networkWifi=&wifi;networkTime=&time;networkWorker=&worker;networkExchange=&exchange;
   if(controller->faulted()) {startupFault="FAULT: initial state invalid";status(startupFault);return;}
   TaskHandle_t handle=nullptr;
   if(xTaskCreatePinnedToCore(networkTask,"xingyi-net",NETWORK_STACK_BYTES,nullptr,1,&handle,0)!=pdPASS || !handle) {
@@ -161,6 +169,11 @@ void loop() {
   if(radioOnline.load() && !timeTrusted.load() && now-lastTlsIo>=5000 && now-lastStatus>=3200 && now-lastDiagnostic>=1000) {
     lastTlsIo=now;char info[64];
     snprintf(info,sizeof(info),"TLS_IO start=%lu tx=%lu rx=%lu",static_cast<unsigned long>(timeStart.load()),static_cast<unsigned long>(timeTx.load()),static_cast<unsigned long>(timeRx.load()));
+    status(info);
+  }
+  if(!counter.isReady() && radioOnline.load() && now-lastRpcDiag>=5000 && now-lastStatus>=1100 && now-lastStatus<1700) {
+    lastRpcDiag=now;char info[64];
+    snprintf(info,sizeof(info),"RPC_DIAG k=%d r=%d s=%d n=%d h=%d",rpcKind.load(),rpcResult.load(),rpcStage.load(),rpcNet.load(),rpcHttp.load());
     status(info);
   }
   delay(1);

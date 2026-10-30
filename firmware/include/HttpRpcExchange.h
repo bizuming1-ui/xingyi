@@ -26,8 +26,15 @@ class HttpRpcExchange final : public RpcExchange {
  public:
   HttpRpcExchange(VerifiedTlsChannel& channel,const char* host,const char* publishableKey,uint32_t timeoutMs)
     : channel_(channel),host_(host),key_(publishableKey),timeoutMs_(timeoutMs) {}
+  enum class Stage { Idle, Validate, Connect, Send, Receive, Complete };
+  Stage lastStage() const {return stage_;}
+  Status lastStatus() const {return status_;}
+  int lastHttpStatus() const {return httpStatus_;}
   Response post(const char* endpoint,const char* json,size_t jsonLength,char* response,size_t responseCapacity) override {
-    Response result{};
+    Response result{};stage_=Stage::Validate;status_=Status::NetworkError;httpStatus_=0;
+    struct Capture { HttpRpcExchange& owner; Response& response;
+      ~Capture(){owner.status_=response.status;owner.httpStatus_=response.httpStatus;}
+    } capture{*this,result};
     if(!validHost(host_) || !validKey(key_) || !validEndpoint(endpoint) || !json || jsonLength==0 || jsonLength>767 ||
        !response || responseCapacity>RpcCodec::MAX_RESPONSE_BYTES || timeoutMs_==0 || timeoutMs_>30000) return result;
     char headers[768]{};
@@ -37,12 +44,15 @@ class HttpRpcExchange final : public RpcExchange {
     if(n<0 || static_cast<size_t>(n)>=sizeof(headers)) return result;
     const uint32_t start=channel_.nowMillis();
     struct Closer { VerifiedTlsChannel& ch; explicit Closer(VerifiedTlsChannel& c):ch(c){} ~Closer(){ch.close();} } closer(channel_);
+    stage_=Stage::Connect;
     const auto connected=channel_.connectVerified(host_,443,timeoutMs_);
     if(connected!=VerifiedTlsChannel::Connect::Ok) { result.status=connected==VerifiedTlsChannel::Connect::Timeout?Status::Timeout:Status::NetworkError; return result; }
     if(!remaining(start)) { result.status=Status::Timeout; return result; }
+    stage_=Stage::Send;
     int failure=writeAll(headers,static_cast<size_t>(n),start);
     if(!failure) failure=writeAll(json,jsonLength,start);
     if(failure) { result.status=failure==-2?Status::Timeout:Status::NetworkError; return result; }
+    stage_=Stage::Receive;
     HttpResponseDecoder parser(response,responseCapacity);
     struct ReadBuffer { char data[256]{}; ~ReadBuffer(){RpcCodec::wipe(data,sizeof(data));} } block;
     for (;;) {
@@ -55,7 +65,7 @@ class HttpRpcExchange final : public RpcExchange {
       }
       const auto parsed=parser.feed(block.data,static_cast<size_t>(count));
       if(parsed==HttpResponseDecoder::Result::Complete) {
-        result.status=Status::Ok;result.httpStatus=parser.statusCode();result.length=parser.length();return result;
+        stage_=Stage::Complete;result.status=Status::Ok;result.httpStatus=parser.statusCode();result.length=parser.length();return result;
       }
       if(parsed==HttpResponseDecoder::Result::TooLarge){result.status=Status::ResponseTooLarge;return result;}
       if(parsed==HttpResponseDecoder::Result::Invalid){result.status=Status::NetworkError;return result;}
@@ -63,6 +73,7 @@ class HttpRpcExchange final : public RpcExchange {
   }
  private:
   VerifiedTlsChannel& channel_; const char* host_;const char* key_;uint32_t timeoutMs_;
+  Stage stage_=Stage::Idle;Status status_=Status::NetworkError;int httpStatus_=0;
   uint32_t remaining(uint32_t start) {const uint32_t elapsed=channel_.nowMillis()-start;return elapsed>=timeoutMs_?0:timeoutMs_-elapsed;}
   int writeAll(const char* data,size_t length,uint32_t start) {
     size_t sent=0;

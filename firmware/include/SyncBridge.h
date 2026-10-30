@@ -47,6 +47,8 @@ class SyncNetworkWorker {
  public:
   SyncNetworkWorker(SyncMailbox& mailbox,RpcExchange& exchange,const char* secret)
     : mailbox_(mailbox),exchange_(exchange),secret_(secret) {}
+  SyncPlanner::Kind lastKind() const {return lastKind_;}
+  RpcWorker::Outcome lastOutcome() const {return lastOutcome_;}
   // Flush an already executed result without issuing or discarding an RPC.
   void flushPending() { if (pending_) publish(); }
   // When the network is unavailable, report a failed command so the counting
@@ -63,6 +65,7 @@ class SyncNetworkWorker {
     if (!mailbox_.take(command)) return;
     completion_={}; completion_.ticket=command.ticket;
     const auto outcome=RpcWorker::execute(exchange_,command,secret_,completion_.reply);
+    lastKind_=command.kind;lastOutcome_=outcome;
     if (outcome.result!=RpcWorker::Result::Ok) completion_.reply={};
     pending_=true;
     publish();
@@ -73,6 +76,7 @@ class SyncNetworkWorker {
   const char* secret_;
   SyncMailbox::Completion completion_{};
   bool pending_=false;
+  SyncPlanner::Kind lastKind_=SyncPlanner::Kind::None;RpcWorker::Outcome lastOutcome_{};
   void publish() {
     // If temporarily full, keep the exact result and retry; do not repeat RPC.
     if (mailbox_.publish(completion_)) { completion_={}; pending_=false; }
