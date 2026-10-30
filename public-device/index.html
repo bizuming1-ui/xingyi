@@ -647,13 +647,14 @@ class HttpResponseDecoder {
   }
   int statusCode() const { return status_; }
   size_t length() const { return length_; }
+  bool reusable() const {return state_==State::Done && !connectionClose_;}
  private:
   enum class State { Headers, Body, ChunkSize, ChunkSizeLF, ChunkBody, ChunkCR, ChunkLF, FinalCR, FinalLF, Done, Invalid, TooLarge };
   State state_=State::Headers;
   char* output_; size_t capacity_;
   char headers_[MAX_HEADER_BYTES+1]{}; size_t headerSize_=0;
   size_t length_=0, expected_=0, chunkSize_=0, remaining_=0; unsigned digits_=0;
-  int status_=0;
+  int status_=0;bool connectionClose_=false,seenConnection_=false;
   static int hex(unsigned char c) {
     if(c>='0' && c<='9')return c-'0';
     if(c>='a' && c<='f')return c-'a'+10;
@@ -704,6 +705,12 @@ class HttpResponseDecoder {
         }
       } else if(equalNoCase(line,"transfer-encoding")) {
         if(hasTransfer || !equalNoCase(value,"chunked")){state_=State::Invalid;return;}hasTransfer=true;
+      } else if(equalNoCase(line,"connection")) {
+        // Only an unambiguous keep-alive header permits reuse; HTTP/1.1 with
+        // no Connection header is persistent by default. Unknown or duplicate
+        // tokens conservatively close the socket after the response.
+        if(seenConnection_ || !equalNoCase(value,"keep-alive"))connectionClose_=true;
+        seenConnection_=true;
       } else if(equalNoCase(line,"content-encoding") && !equalNoCase(value,"identity")) {
         state_=State::Invalid;return;
       }
@@ -733,6 +740,7 @@ class VerifiedTlsChannel {
   virtual int write(const char* data,size_t length,uint32_t timeoutMs)=0;
   virtual int read(char* data,size_t capacity,uint32_t timeoutMs)=0;
   virtual void close()=0;
+  virtual bool canReuse(){return false;}
 };
 
 // Fixed-origin, one-request-per-connection HTTP exchange. No redirect handling.
@@ -740,14 +748,17 @@ class VerifiedTlsChannel {
 // Runtime must provide a real verified TLS channel and synchronized clock.
 class HttpRpcExchange final : public RpcExchange {
  public:
-  HttpRpcExchange(VerifiedTlsChannel& channel,const char* host,const char* publishableKey,uint32_t timeoutMs,uint32_t dataTimeoutMs=0)
-    : channel_(channel),host_(host),key_(publishableKey),timeoutMs_(timeoutMs),dataTimeoutMs_(dataTimeoutMs?dataTimeoutMs:timeoutMs),activeTimeoutMs_(timeoutMs) {}
+  HttpRpcExchange(VerifiedTlsChannel& channel,const char* host,const char* publishableKey,uint32_t timeoutMs,uint32_t dataTimeoutMs=0,bool keepAlive=false)
+    : channel_(channel),host_(host),key_(publishableKey),timeoutMs_(timeoutMs),dataTimeoutMs_(dataTimeoutMs?dataTimeoutMs:timeoutMs),activeTimeoutMs_(timeoutMs),keepAlive_(keepAlive) {}
+  ~HttpRpcExchange() override {close();}
+  void close() override {if(connected_){channel_.close();connected_=false;}}
   enum class Stage { Idle, Validate, Connect, Send, Receive, Complete };
   Stage lastStage() const {return stage_;}
   Status lastStatus() const {return status_;}
   int lastHttpStatus() const {return httpStatus_;}
+  bool lastReused() const {return lastReused_;}
   Response post(const char* endpoint,const char* json,size_t jsonLength,char* response,size_t responseCapacity) override {
-    Response result{};stage_=Stage::Validate;status_=Status::NetworkError;httpStatus_=0;
+    Response result{};stage_=Stage::Validate;status_=Status::NetworkError;httpStatus_=0;lastReused_=false;
     struct Capture { HttpRpcExchange& owner; Response& response;
       ~Capture(){owner.status_=response.status;owner.httpStatus_=response.httpStatus;}
     } capture{*this,result};
@@ -763,14 +774,19 @@ class HttpRpcExchange final : public RpcExchange {
                       strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Abort))==0)?dataTimeoutMs_:timeoutMs_;
     char headers[768]{};
     const int n=snprintf(headers,sizeof(headers),
-      "POST /rest/v1/rpc/%s HTTP/1.1\\r\\nHost: %s\\r\\napikey: %s\\r\\nContent-Type: application/json\\r\\nAccept: application/json\\r\\nAccept-Encoding: identity\\r\\nConnection: close\\r\\nContent-Length: %lu\\r\\n\\r\\n",
-      endpoint,host_,key_,static_cast<unsigned long>(jsonLength));
+      "POST /rest/v1/rpc/%s HTTP/1.1\\r\\nHost: %s\\r\\napikey: %s\\r\\nContent-Type: application/json\\r\\nAccept: application/json\\r\\nAccept-Encoding: identity\\r\\nConnection: %s\\r\\nContent-Length: %lu\\r\\n\\r\\n",
+      endpoint,host_,key_,keepAlive_?"keep-alive":"close",static_cast<unsigned long>(jsonLength));
     if(n<0 || static_cast<size_t>(n)>=sizeof(headers)) return result;
     const uint32_t start=channel_.nowMillis();
-    struct Closer { VerifiedTlsChannel& ch; explicit Closer(VerifiedTlsChannel& c):ch(c){} ~Closer(){ch.close();} } closer(channel_);
+    struct Closer { HttpRpcExchange& owner; bool keep; explicit Closer(HttpRpcExchange& x):owner(x),keep(false){} ~Closer(){if(!keep)owner.close();} } closer(*this);
     stage_=Stage::Connect;
-    const auto connected=channel_.connectVerified(host_,443,activeTimeoutMs_);
-    if(connected!=VerifiedTlsChannel::Connect::Ok) { result.status=connected==VerifiedTlsChannel::Connect::Timeout?Status::Timeout:Status::NetworkError; return result; }
+    if(connected_ && (!keepAlive_ || static_cast<uint32_t>(start-lastUsed_)>=5000 || !channel_.canReuse()))close();
+    lastReused_=connected_;
+    if(!connected_) {
+      const auto connected=channel_.connectVerified(host_,443,activeTimeoutMs_);
+      if(connected!=VerifiedTlsChannel::Connect::Ok) {channel_.close();result.status=connected==VerifiedTlsChannel::Connect::Timeout?Status::Timeout:Status::NetworkError;return result;}
+      connected_=true;
+    }
     if(!remaining(start)) { result.status=Status::Timeout; return result; }
     stage_=Stage::Send;
     int failure=writeAll(headers,static_cast<size_t>(n),start);
@@ -789,7 +805,10 @@ class HttpRpcExchange final : public RpcExchange {
       }
       const auto parsed=parser.feed(block.data,static_cast<size_t>(count));
       if(parsed==HttpResponseDecoder::Result::Complete) {
-        stage_=Stage::Complete;result.status=Status::Ok;result.httpStatus=parser.statusCode();result.length=parser.length();return result;
+        stage_=Stage::Complete;result.status=Status::Ok;result.httpStatus=parser.statusCode();result.length=parser.length();
+        closer.keep=keepAlive_ && parser.reusable() && result.httpStatus>=200 && result.httpStatus<300 && channel_.canReuse();
+        if(closer.keep)lastUsed_=channel_.nowMillis();
+        return result;
       }
       if(parsed==HttpResponseDecoder::Result::TooLarge){result.status=Status::ResponseTooLarge;return result;}
       if(parsed==HttpResponseDecoder::Result::Invalid){result.status=Status::NetworkError;return result;}
@@ -797,6 +816,7 @@ class HttpRpcExchange final : public RpcExchange {
   }
  private:
   VerifiedTlsChannel& channel_; const char* host_;const char* key_;uint32_t timeoutMs_,dataTimeoutMs_,activeTimeoutMs_;
+  bool keepAlive_=false,connected_=false,lastReused_=false;uint32_t lastUsed_=0;
   Stage stage_=Stage::Idle;Status status_=Status::NetworkError;int httpStatus_=0;
   uint32_t remaining(uint32_t start) {const uint32_t elapsed=channel_.nowMillis()-start;return elapsed>=activeTimeoutMs_?0:activeTimeoutMs_-elapsed;}
   int writeAll(const char* data,size_t length,uint32_t start) {
@@ -877,10 +897,10 @@ class MbedTlsChannel final : public VerifiedTlsChannel {
     const uint32_t start=clock_.nowMillis();
     for(;;) {
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!timeValid() || connection_.state()!=VerifiedConnect::State::Verified){close();return -1;}
+      if(!canReuse()){close();return -1;}
       const auto r=tls_.write(reinterpret_cast<const uint8_t*>(data),length);
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!timeValid()){close();return -1;}
+      if(!canReuse()){close();return -1;}
       if(r.status==MbedTlsSession::Status::Progress)return static_cast<int>(r.count);
       if(r.status!=MbedTlsSession::Status::WantIo){close();return -1;}
       scheduler_.yield();
@@ -891,16 +911,17 @@ class MbedTlsChannel final : public VerifiedTlsChannel {
     const uint32_t start=clock_.nowMillis();
     for(;;) {
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!timeValid() || connection_.state()!=VerifiedConnect::State::Verified){close();return -1;}
+      if(!canReuse()){close();return -1;}
       const auto r=tls_.read(reinterpret_cast<uint8_t*>(data),capacity);
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!timeValid()){close();return -1;}
+      if(!canReuse()){close();return -1;}
       if(r.status==MbedTlsSession::Status::Progress)return static_cast<int>(r.count);
       if(r.status==MbedTlsSession::Status::Closed){close();return 0;}
       if(r.status!=MbedTlsSession::Status::WantIo){close();return -1;}
       scheduler_.yield();
     }
   }
+  bool canReuse() override {return connection_.state()==VerifiedConnect::State::Verified && timeValid() && tls_.datesStillValid();}
   void close() override {connection_.close();}
  private:
   ConnectionClock& clock_;NetworkYield& scheduler_;TrustedTimeWindow& time_;VerifiedConnect& connection_;
@@ -970,7 +991,7 @@ class MbedTlsSession {
     mbedtls_ssl_conf_authmode(&config_,MBEDTLS_SSL_VERIFY_REQUIRED);
     // Some ESP SDKs compile mbedTLS without built-in date checks. The
     // verification callback checks every certificate in the verified chain.
-    sawLeaf_=false;mbedtls_ssl_conf_verify(&config_,&verifyDate,this);
+    sawLeaf_=false;hasValidity_=false;mbedtls_ssl_conf_verify(&config_,&verifyDate,this);
     mbedtls_ssl_conf_min_version(&config_,MBEDTLS_SSL_MAJOR_VERSION_3,MBEDTLS_SSL_MINOR_VERSION_3);
     mbedtls_ssl_conf_ca_chain(&config_,&ca_,nullptr);
     mbedtls_ssl_conf_rng(&config_,mbedtls_ctr_drbg_random,&rng_);
@@ -988,6 +1009,15 @@ class MbedTlsSession {
       state_=State::Verified;
     } else if(rc!=MBEDTLS_ERR_SSL_WANT_READ && rc!=MBEDTLS_ERR_SSL_WANT_WRITE)fail();
     return state_;
+  }
+  // Recheck the complete verified chain's date intersection against the
+  // current authenticated clock window before every reused operation.
+  bool datesStillValid() {
+    if(state_!=State::Verified || !window_ || !sawLeaf_ || !hasValidity_)return false;
+    TrustedTimeWindow::Bounds b{};int earliest[6]{},latest[6]{};
+    if(!window_->bounds(b) || b.latestMs<b.earliestMs || !utcFields(b.earliestMs/1000,earliest) ||
+       !utcFields(b.latestMs/1000+(b.latestMs%1000!=0),latest))return false;
+    return compare(validFrom_,earliest)<=0 && compare(validTo_,latest)>=0;
   }
   // After WantIo, retry the same buffer and length until this write completes.
   Result write(const uint8_t* data,size_t length) {
@@ -1010,6 +1040,7 @@ class MbedTlsSession {
  private:
   NonblockingTcp& tcp_;State state_=State::Idle;bool sawLeaf_=false;TrustedTimeWindow* window_=nullptr;
   mbedtls_ssl_context ssl_;mbedtls_ssl_config config_;mbedtls_x509_crt ca_;
+  bool hasValidity_=false;mbedtls_x509_time validFrom_{},validTo_{};
   mbedtls_entropy_context entropy_;mbedtls_ctr_drbg_context rng_;
   bool fail(){tcp_.close();state_=State::Failed;return false;}
   Result interpret(int rc) {
@@ -1038,6 +1069,11 @@ class MbedTlsSession {
     auto* self=static_cast<MbedTlsSession*>(context);
     if(!cert || !flags || depth<0)return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
     if(depth==0)self->sawLeaf_=true;
+    if(!self->hasValidity_) {self->validFrom_=cert->valid_from;self->validTo_=cert->valid_to;self->hasValidity_=true;}
+    else {
+      if(compareTimes(cert->valid_from,self->validFrom_)>0)self->validFrom_=cert->valid_from;
+      if(compareTimes(cert->valid_to,self->validTo_)<0)self->validTo_=cert->valid_to;
+    }
     int earliest[6]{},latest[6]{};
     if(self->window_) {
       TrustedTimeWindow::Bounds bounds{};
@@ -1064,6 +1100,9 @@ class MbedTlsSession {
     if(t<0 || static_cast<uint64_t>(t)!=seconds || !gmtime_r(&t,&utc))return false;
     out[0]=utc.tm_year+1900;out[1]=utc.tm_mon+1;out[2]=utc.tm_mday;
     out[3]=utc.tm_hour;out[4]=utc.tm_min;out[5]=utc.tm_sec;return true;
+  }
+  static int compareTimes(const mbedtls_x509_time& a,const mbedtls_x509_time& b) {
+    const int values[]={b.year,b.mon,b.day,b.hour,b.min,b.sec};return compare(a,values);
   }
   static int compare(const mbedtls_x509_time& t,const int current[6]) {
     const int values[]={t.year,t.mon,t.day,t.hour,t.min,t.sec};
@@ -1115,9 +1154,10 @@ class NetworkTaskCoordinator {
     const uint32_t now=clock_.nowMillis();
     if(!wifi_.step(now)){worker_.flushPending();return;}
     if(wifi_.state()!=WifiSupervisor::State::Online) {
-      time_.invalidate();attempted_=false;worker_.failUnavailable();return;
+      worker_.closeConnection();time_.invalidate();attempted_=false;worker_.failUnavailable();return;
     }
     if(!time_.trusted()) {
+      worker_.closeConnection(); // bootstrap shares the same TCP/TLS resources
       if(!attempted_ || static_cast<uint32_t>(now-lastAttempt_)>=TIME_RETRY_MS) {
         (void)time_.refresh();
         // Backoff is measured from completion, including timeout duration.
@@ -1547,6 +1587,7 @@ class RpcExchange {
   enum class Status { Ok, NetworkError, Timeout, ResponseTooLarge };
   struct Response { Status status=Status::NetworkError; int httpStatus=0; size_t length=0; };
   virtual ~RpcExchange() = default;
+  virtual void close() {}
   virtual Response post(const char* endpoint,const char* json,size_t jsonLength,char* response,size_t responseCapacity)=0;
 };
 
@@ -1568,8 +1609,8 @@ class RpcWorker {
     const char* endpoint=RpcCodec::endpoint(command.kind);
     const auto result=transport.post(endpoint,request.data,strlen(request.data),response.data,RpcCodec::MAX_RESPONSE_BYTES);
     if (result.status!=RpcExchange::Status::Ok || result.length>RpcCodec::MAX_RESPONSE_BYTES) return {Result::TransportError,result.httpStatus};
-    if (result.httpStatus<200 || result.httpStatus>=300) return {Result::HttpError,result.httpStatus};
-    if (RpcCodec::decode(command,response.data,result.length,reply)!=RpcCodec::Result::Ok) return {Result::InvalidResponse,result.httpStatus};
+    if (result.httpStatus<200 || result.httpStatus>=300) {transport.close();return {Result::HttpError,result.httpStatus};}
+    if (RpcCodec::decode(command,response.data,result.length,reply)!=RpcCodec::Result::Ok) {transport.close();return {Result::InvalidResponse,result.httpStatus};}
     return {Result::Ok,result.httpStatus};
   }
  private:
@@ -1666,6 +1707,7 @@ class SyncNetworkWorker {
     : mailbox_(mailbox),exchange_(exchange),secret_(secret) {}
   SyncPlanner::Kind lastKind() const {return lastKind_;}
   RpcWorker::Outcome lastOutcome() const {return lastOutcome_;}
+  void closeConnection() {exchange_.close();}
   // Flush an already executed result without issuing or discarding an RPC.
   void flushPending() { if (pending_) publish(); }
   // When the network is unavailable, report a failed command so the counting
@@ -2629,8 +2671,8 @@ std::atomic<bool> stopNetwork{false};
 std::atomic<bool> radioOnline{false},timeTrusted{false};
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0};
-std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0};
-std::atomic<int> barrierRpcKind{0},barrierRpcResult{1},barrierRpcStage{0},barrierRpcNet{1},barrierRpcHttp{0};
+std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0},rpcReuse{0};
+std::atomic<int> barrierRpcKind{0},barrierRpcResult{1},barrierRpcStage{0},barrierRpcNet{1},barrierRpcHttp{0},barrierRpcReuse{0};
 bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
@@ -2664,15 +2706,18 @@ void networkTask(void*) {
     rpcStage.store(static_cast<int>(networkExchange->lastStage()),std::memory_order_relaxed);
     rpcNet.store(static_cast<int>(networkExchange->lastStatus()),std::memory_order_relaxed);
     rpcHttp.store(networkExchange->lastHttpStatus(),std::memory_order_relaxed);
+    rpcReuse.store(networkExchange->lastReused()?1:0,std::memory_order_relaxed);
     if(static_cast<int>(networkWorker->lastKind())>=static_cast<int>(SyncPlanner::Kind::Freeze)) {
       barrierRpcKind.store(static_cast<int>(networkWorker->lastKind()),std::memory_order_relaxed);
       barrierRpcResult.store(static_cast<int>(networkWorker->lastOutcome().result),std::memory_order_relaxed);
       barrierRpcStage.store(static_cast<int>(networkExchange->lastStage()),std::memory_order_relaxed);
       barrierRpcNet.store(static_cast<int>(networkExchange->lastStatus()),std::memory_order_relaxed);
       barrierRpcHttp.store(networkExchange->lastHttpStatus(),std::memory_order_relaxed);
+      barrierRpcReuse.store(networkExchange->lastReused()?1:0,std::memory_order_relaxed);
     }
     vTaskDelay(1);
   }
+  networkWorker->closeConnection();
   vTaskDelete(nullptr);
 }
 const char* statusName(DeviceInput::Status s) {
@@ -2709,7 +2754,7 @@ void setup() {
   static MbedTlsSession tls(tcp);static VerifiedConnect verified(clock,tcp,resolved,tls);
   static TrustedTimeWindow window(monotonic,config.timeLifetimeMs,config.clockDriftPpm);
   static MbedTlsChannel channel(clock,scheduler,window,verified,tls,config.ca);
-  static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS,DATA_RPC_TIMEOUT_MS);
+  static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS,DATA_RPC_TIMEOUT_MS,true);
   static SyncNetworkWorker worker(mailbox,exchange,config.secret);
   static TimeProof proof(networkEntropy);static TimeBootstrapExchange bootstrap(clock,scheduler,tcp,resolved,proof);
   static TimeWindowSynchronizer sync(monotonic,window,bootstrap);
@@ -2758,7 +2803,7 @@ void loop() {
   }
   if(radioOnline.load() && now-lastRpcDiag>=5000 && now-lastStatus>=150 && now-lastStatus<300) {
     lastRpcDiag=now;char info[64];
-    snprintf(info,sizeof(info),"RPC_DIAG k=%d r=%d s=%d n=%d h=%d",rpcKind.load(),rpcResult.load(),rpcStage.load(),rpcNet.load(),rpcHttp.load());
+    snprintf(info,sizeof(info),"RPC_DIAG k=%d r=%d s=%d n=%d h=%d u=%d",rpcKind.load(),rpcResult.load(),rpcStage.load(),rpcNet.load(),rpcHttp.load(),rpcReuse.load());
     status(info);
   }
   if(radioOnline.load() && now-lastFreezeDiag>=5000 && now-lastStatus>=570 && now-lastStatus<670) {
@@ -2768,7 +2813,7 @@ void loop() {
   }
   if(radioOnline.load() && barrierRpcKind.load()!=0 && now-lastBarrierRpcDiag>=5000 && now-lastStatus>=850 && now-lastStatus<950) {
     lastBarrierRpcDiag=now;char info[64];
-    snprintf(info,sizeof(info),"BAR_RPC k=%d r=%d s=%d n=%d h=%d",barrierRpcKind.load(),barrierRpcResult.load(),barrierRpcStage.load(),barrierRpcNet.load(),barrierRpcHttp.load());
+    snprintf(info,sizeof(info),"BAR_RPC k=%d r=%d s=%d n=%d h=%d u=%d",barrierRpcKind.load(),barrierRpcResult.load(),barrierRpcStage.load(),barrierRpcNet.load(),barrierRpcHttp.load(),barrierRpcReuse.load());
     status(info);
   }
   delay(1);
@@ -2837,13 +2882,13 @@ TLS 握手的耗时，tx/rx 为本次 TLS 底层发送/接收的累计字节数�
 可能的应用数据），仅作定位，不含数据内容。两行均是最近完成尝试的快照，
 可能由于任务更新或串口繁忙而不同步或缺失。
 
-设备联网时，\`RPC_DIAG k=<数字> r=<数字> s=<数字> n=<数字> h=<数字>\`
+设备联网时，\`RPC_DIAG k=<数字> r=<数字> s=<数字> n=<数字> h=<数字> u=<数字>\`
 记录最近一次已执行的设备 RPC，数字不含凭据或订单内容：k 是操作类型
 （0 尚未执行、1 查询、2 上传、3 冻结、4 冻结状态、5 续约、6 取消），
 r 是执行结果（0 成功、1 请求无效、2 传输错误、3 HTTP 错误、4 响应无效），
 s 是 HTTP 阶段（0 尚未开始、1 校验、2 连接、3 发送、4 接收、5 完成），
 n 是传输结果（0 成功、1 网络错误、2 超时、3 响应过大），h 为 HTTP 状态码
-（未收到时为 0）。k=0 时其余数值只是默认值；如果请求未能编码，传输数字
+（未收到时为 0），u 为本次是否尝试复用已有连接（1 是，0 否，不代表成功）。k=0 时其余数值只是默认值；如果请求未能编码，传输数字
 可能仍是上一次的快照。不同线程的数字是尽力显示，可能错过或不同步。
 
 针对实板反复出现的状态查询超时，实验性将设备状态查询和计数上传的完整
@@ -2860,6 +2905,11 @@ n 是传输结果（0 成功、1 网络错误、2 超时、3 响应过大），h
 RPC_DIAG 的 k 一致）。\`BAR_RPC\` 为最近一次已执行的冻结/状态/续约/取消 RPC
 快照，格式与 RPC_DIAG 一致；尚未执行则不打印。它们不显示请求或订单内容，
 且并非同一时刻的原子快照，不能单独证明是否可以确认。
+
+此候选试验 HTTPS 连接复用，空闲 5 秒后关闭，断网或时间失效时关闭；每次
+读写仍检查认证时间窗口及整个已验证证书链的有效期。异常或不完整响应关闭
+连接，不在传输层自动重放请求。超时仍不证明服务器未处理。此优化尚未在
+实板验证，也不能保证网络延迟或 2 秒租约成功；不得作为生产就绪依据。
 
 修复慢网络下状态轮询持续抢占绑定/上传的问题：成功查询后至少给予一次
 处理结果的机会。此修复基于自动化模拟，仍需实板验证；不能保证热点稳定
