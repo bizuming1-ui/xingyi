@@ -48,7 +48,7 @@ function App(){
  useEffect(()=>{
    if(!isolatedTest || !devicePreview || !session || access.userId!==session.user.id || access.status!=='allowed' || page!=='order' || !selected)return;
    const orderId=selected;setOrderDeviceView({orderId,type:'loading'});
-   const monitor=new DeviceMonitor(new DeviceDraftData(db));
+   const monitor=new DeviceMonitor(new DeviceDraftData(db),{interval:250});
    monitor.start(orderId,event=>setOrderDeviceView({orderId,...event}));
    return ()=>monitor.stop();
  },[session,access,page,selected]);

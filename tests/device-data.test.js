@@ -58,6 +58,16 @@ test('monitor reports failures and only retries after the prior read completes',
   m.stop();assert.throws(()=>new DeviceMonitor({}, {interval:0}),/刷新间隔/);
 });
 
+test('fast draft polling remains serialized and backs off on errors',async()=>{
+  const pending=deferred(),timers=[],updates=[];let calls=0;
+  const monitor=new DeviceMonitor({load(){calls++;return calls===1?pending.promise:Promise.reject(new Error('offline'));}},
+    {interval:250,setTimer:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimer:()=>{}});
+  monitor.start(order,e=>updates.push(e));await flush();assert.equal(calls,1);assert.equal(timers.length,0);
+  pending.resolve({orderId:order,draftCount:3});await flush();assert.equal(timers[0].ms,250);
+  timers[0].fn();await flush();assert.equal(calls,2);assert.equal(updates[1].type,'error');assert.equal(timers[1].ms,1000);
+  monitor.stop();timers[1].fn();await flush();assert.equal(calls,2);
+});
+
 test('a rejected read waits for the other read before failing',async()=>{
   const wait=deferred();let done=false;
   const db={rpc:()=>Promise.reject(new Error('offline')),from:()=>({select:()=>({eq:()=>({maybeSingle:()=>wait.promise})})})};

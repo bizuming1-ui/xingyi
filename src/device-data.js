@@ -83,7 +83,8 @@ export class DeviceMonitor {
       catch {event={type:'error',message:'设备数据刷新失败，请检查网络。'};}
       if(this.generation!==generation)return;
       onUpdate(event);
-      if(this.generation===generation)this.timer=this.setTimer(poll,this.interval);
+      // Network failures back off to avoid a 4 Hz retry storm on weak links.
+      if(this.generation===generation)this.timer=this.setTimer(poll,event.type==='error'?Math.max(1000,this.interval):this.interval);
     };
     void poll();
   }

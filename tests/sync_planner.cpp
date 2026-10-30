@@ -125,6 +125,27 @@ int main(){
  assert(uncertain.complete(expCmd.ticket,status(order1,binding1,1,B::Expired),1));
  assert(uncertain.faulted() && uncertain.faultReason()==SyncPlanner::FaultReason::RemoteFrozenWithoutJournal);
 
+ // Sustained counts: prioritize up to two upload attempts then poll so a
+ // confirmation request cannot be starved by an endless stream of presses.
+ Store fastStore;DurableCounter fastCounter(fastStore);assert(fastCounter.load()==R::Ok);
+ assert(fastCounter.bind(order1,1,binding1,"10000000-0000-4000-8000-000000000001")==R::Ok);
+ Epochs fastEpoch;SyncPlanner fast(fastCounter,fastEpoch,true);
+ auto fastCmd=fast.next(0);assert(fastCmd.kind==K::Poll);
+ assert(fast.complete(fastCmd.ticket,status(order1,binding1,1),1));
+ fastCmd=fast.next(200);assert(fastCmd.kind==K::Upload);
+ assert(fast.complete(fastCmd.ticket,accepted(0),201));
+ assert(fast.count(1)==R::Ok);fastCmd=fast.next(700);assert(fastCmd.kind==K::Upload);
+ assert(fast.count(1)==R::Ok && fast.complete(fastCmd.ticket,accepted(1),701));
+ fastCmd=fast.next(900);assert(fastCmd.kind==K::Poll);
+ assert(fast.complete(fastCmd.ticket,status(order1,binding1,1,B::Requested),901));
+ fastCmd=fast.next(1100);assert(fastCmd.kind==K::Upload && fastCmd.total==2);
+ assert(fast.count(1)==R::Ok && fast.complete(fastCmd.ticket,accepted(2),1101));
+ fastCmd=fast.next(1300);assert(fastCmd.kind==K::Upload && fastCmd.total==3);
+ assert(fast.complete(fastCmd.ticket,accepted(3),1301));
+ fastCmd=fast.next(1500);assert(fastCmd.kind==K::Poll);
+ assert(fast.complete(fastCmd.ticket,status(order1,binding1,1,B::Requested),1501));
+ fastCmd=fast.next(1700);assert(fastCmd.kind==K::Freeze && fastCounter.isFrozen());
+
  // Fail closed if server claims an impossible acknowledgement.
  Store store2; DurableCounter c2(store2); assert(c2.load()==R::Ok); Epochs epochs2; SyncPlanner invalid(c2,epochs2);
  auto step=invalid.next(0); assert(invalid.complete(step.ticket,status(order1,binding1,1),0));

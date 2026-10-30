@@ -40,8 +40,8 @@ class SyncPlanner {
     char nonce[37]{};
   };
 
-  SyncPlanner(DurableCounter& counter, EpochSource& epochs)
-      : counter_(counter), epochs_(epochs), streamRegistered_(!counter.isReady()) {
+  SyncPlanner(DurableCounter& counter, EpochSource& epochs, bool favorUpload=false)
+      : counter_(counter), epochs_(epochs), favorUpload_(favorUpload), streamRegistered_(!counter.isReady()) {
     if (!counter.isLoaded()) setFault(FaultReason::NotLoaded);
     // On reboot we do not know whether the server has seen this epoch, even
     // when its local total is zero. Frozen state must be resolved first.
@@ -84,7 +84,12 @@ class SyncPlanner {
     // one scheduling opportunity before polling again, or binding/uploads may
     // be permanently starved on a real network.
     const bool justPolled=pollJustCompleted_;pollJustCompleted_=false;
-    if (!polled_ || (!justPolled && elapsed(now,lastPoll_)>=500)) return issue(Kind::Poll,now);
+    // Under sustained counting, allow at most two uploads per status poll.
+    // This reduces the upload/poll alternation overhead without starving
+    // binding changes or confirmation discovery indefinitely.
+    const bool uploadPending=counter_.isReady() && counter_.pending()>0;
+    if (!polled_ || (!justPolled && elapsed(now,lastPoll_)>=500 &&
+        (!favorUpload_ || !uploadPending || uploadsSincePoll_>=2))) return issue(Kind::Poll,now);
     if (counter_.isReady() && (!streamRegistered_ || counter_.pending()>0)) return issue(Kind::Upload,now);
     if (uuid(desiredBinding_) && uuid(desiredOrder_) && desiredRevision_>0) {
       const auto& s=counter_.state();
@@ -171,11 +176,12 @@ class SyncPlanner {
   }
 
  private:
-  DurableCounter& counter_; EpochSource& epochs_;
+  DurableCounter& counter_; EpochSource& epochs_;bool favorUpload_;
   FaultReason faultReason_=FaultReason::None;
   void setFault(FaultReason reason) {fault_=true;faultReason_=reason;}
   bool fault_=false, sentAny_=false, polled_=false, pollJustCompleted_=false, streamRegistered_=false, needBarrierStatus_=false, mustAbort_=false, renewed_=false, epochAttempted_=false;
   uint32_t lastSent_=0,lastPoll_=0,lastRenew_=0,lastEpochAttempt_=0,nextTicket_=0;
+  unsigned uploadsSincePoll_=0;
   uint64_t desiredRevision_=0;
   char desiredOrder_[37]{},desiredBinding_[37]{},barrier_[37]{},nonce_[37]{};
   BarrierState remoteBarrier_=BarrierState::None;
@@ -191,7 +197,8 @@ class SyncPlanner {
   }
   Command issue(Kind kind,uint32_t now) {
     Command cmd{};cmd.kind=kind; if(++nextTicket_==0)++nextTicket_;cmd.ticket=nextTicket_;
-    if(kind==Kind::Poll)lastPoll_=now;
+    if(kind==Kind::Poll){lastPoll_=now;uploadsSincePoll_=0;}
+    if(kind==Kind::Upload && uploadsSincePoll_<2)++uploadsSincePoll_;
     if(kind==Kind::Upload || kind==Kind::Freeze || kind==Kind::Renew) {
       copy(cmd.binding,counter_.state().bindingId);copy(cmd.epoch,counter_.state().epochId);
       cmd.total=kind==Kind::Upload?counter_.state().total:counter_.state().frozenTotal;

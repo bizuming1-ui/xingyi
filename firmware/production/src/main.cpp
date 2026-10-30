@@ -61,7 +61,8 @@ std::atomic<int> barrierRpcKind{0},barrierRpcResult{1},barrierRpcStage{0},barrie
 bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
-uint32_t lastStatus=0,lastDiagnostic=0,lastTlsIo=0,lastRpcDiag=0,lastFreezeDiag=0,lastBarrierRpcDiag=0;
+uint32_t lastStatus=0,lastDiagnostic=0,lastTlsIo=0,lastRpcDiag=0,lastFreezeDiag=0,lastBarrierRpcDiag=0,lastCountLine=0;
+uint64_t lastCountTotal=0;
 
 // Console output is best-effort and never waits for an attached terminal. No
 // secret, SSID, device ID, production-order UUID or request body is printed.
@@ -128,7 +129,7 @@ void setup() {
   static EspWifiEntropy hardwareEntropy;
   static GuardedEntropy countEntropy(lock,hardwareEntropy), networkEntropy(lock,hardwareEntropy);
   static RandomEpochSource epochs(countEntropy);
-  static SyncPlanner planner(counter,epochs);
+  static SyncPlanner planner(counter,epochs,true);
   static SyncController countController(planner,mailbox);
   static DeviceInput button(counter,planner,digitalRead(BUTTON_PIN)==LOW,millis());
   static Clock clock;static Yield scheduler;static EspMonotonicMillis monotonic;
@@ -151,7 +152,7 @@ void setup() {
   if(xTaskCreatePinnedToCore(networkTask,"xingyi-net",NETWORK_STACK_BYTES,nullptr,1,&handle,0)!=pdPASS || !handle) {
     startupFault="FAULT: network task unavailable";status(startupFault);return;
   }
-  initialized=true;
+  initialized=true;lastCountTotal=counter.state().total;
   status("Test candidate started; do not use in production");
 }
 void loop() {
@@ -176,6 +177,12 @@ void loop() {
       snprintf(info,sizeof(info),"WIFI=%d TIME=%d BOUND=%d PENDING=%llu",radioOnline.load()?1:0,timeTrusted.load()?1:0,counter.isReady()?1:0,static_cast<unsigned long long>(counter.pending()));
       status(info);
     }
+  }
+  // A local counter update is informative only: it is NOT the server draft.
+  // Rate-limit to protect the GPIO/NVS task; output may be dropped when full.
+  if(!controller->faulted() && counter.isReady() && counter.state().total!=lastCountTotal && now-lastCountLine>=200) {
+    char info[64];snprintf(info,sizeof(info),"COUNT total=%llu pending=%llu",static_cast<unsigned long long>(counter.state().total),static_cast<unsigned long long>(counter.pending()));
+    status(info);lastCountLine=now;lastCountTotal=counter.state().total;
   }
   // Emit only numeric failure stage/result/detail, never credentials or data.
   // Offset from the main status line so a small serial buffer can drain.
