@@ -43,10 +43,10 @@ class MbedTlsChannel final : public VerifiedTlsChannel {
     const uint32_t start=clock_.nowMillis();
     for(;;) {
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!timeValid() || connection_.state()!=VerifiedConnect::State::Verified){close();return -1;}
+      if(!canReuse()){close();return -1;}
       const auto r=tls_.write(reinterpret_cast<const uint8_t*>(data),length);
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!timeValid()){close();return -1;}
+      if(!canReuse()){close();return -1;}
       if(r.status==MbedTlsSession::Status::Progress)return static_cast<int>(r.count);
       if(r.status!=MbedTlsSession::Status::WantIo){close();return -1;}
       scheduler_.yield();
@@ -57,16 +57,17 @@ class MbedTlsChannel final : public VerifiedTlsChannel {
     const uint32_t start=clock_.nowMillis();
     for(;;) {
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!timeValid() || connection_.state()!=VerifiedConnect::State::Verified){close();return -1;}
+      if(!canReuse()){close();return -1;}
       const auto r=tls_.read(reinterpret_cast<uint8_t*>(data),capacity);
       if(elapsed(start,timeoutMs)){close();return -2;}
-      if(!timeValid()){close();return -1;}
+      if(!canReuse()){close();return -1;}
       if(r.status==MbedTlsSession::Status::Progress)return static_cast<int>(r.count);
       if(r.status==MbedTlsSession::Status::Closed){close();return 0;}
       if(r.status!=MbedTlsSession::Status::WantIo){close();return -1;}
       scheduler_.yield();
     }
   }
+  bool canReuse() override {return connection_.state()==VerifiedConnect::State::Verified && timeValid() && tls_.datesStillValid();}
   void close() override {connection_.close();}
  private:
   ConnectionClock& clock_;NetworkYield& scheduler_;TrustedTimeWindow& time_;VerifiedConnect& connection_;

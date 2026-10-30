@@ -5,12 +5,13 @@
 #include <string>
 
 struct FakeTls : VerifiedTlsChannel {
-  std::string sent, incoming; size_t cursor=0;uint32_t time=0; int closes=0, connects=0, calls=0; int maxWrite=11,maxRead=7;bool failConnect=false,timeoutRead=false, late=false;uint32_t readDelay=0;
+  std::string sent, incoming; size_t cursor=0;uint32_t time=0; int closes=0, connects=0, calls=0; int maxWrite=11,maxRead=7;bool failConnect=false,timeoutRead=false, late=false,allowReuse=false,failWrite=false;uint32_t readDelay=0;
   uint32_t nowMillis() override {return time;}
   Connect connectVerified(const char* host,uint16_t port,uint32_t timeout) override {++connects;assert(strcmp(host,"project123.supabase.co")==0 && port==443 && timeout>0);return failConnect?Connect::Error:Connect::Ok;}
-  int write(const char* data,size_t length,uint32_t timeout) override {assert(timeout);++calls;size_t n=length<static_cast<size_t>(maxWrite)?length:static_cast<size_t>(maxWrite);sent.append(data,n);++time;return static_cast<int>(n);}
+  int write(const char* data,size_t length,uint32_t timeout) override {assert(timeout);++calls;if(failWrite)return -1;size_t n=length<static_cast<size_t>(maxWrite)?length:static_cast<size_t>(maxWrite);sent.append(data,n);++time;return static_cast<int>(n);}
   int read(char* out,size_t cap,uint32_t timeout) override {assert(timeout);++calls;if(timeoutRead)return -2;if(late)time+=timeout;else {time+=readDelay+1;readDelay=0;}if(cursor==incoming.size())return 0;size_t n=incoming.size()-cursor;if(n>cap)n=cap;if(n>static_cast<size_t>(maxRead))n=maxRead;memcpy(out,incoming.data()+cursor,n);cursor+=n;return static_cast<int>(n);}
   void close() override {++closes;}
+  bool canReuse() override {return allowReuse;}
 };
 const char* secret="0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const char* key="sb_publishable_public-key";
@@ -67,5 +68,25 @@ int main(){
   FakeTls lease;lease.readDelay=3500;lease.incoming=data.incoming;
   HttpRpcExchange shortLease(lease,"project123.supabase.co",key,3000,8000);
   assert(shortLease.post(RpcCodec::endpoint(SyncPlanner::Kind::Renew),"{}",2,output,sizeof(output)).status==RpcExchange::Status::Timeout);
+  // Verified connections may be reused; server close and all errors force
+  // a close, and an uncertain write is never retried by the transport.
+  FakeTls reuse;reuse.allowReuse=true;reuse.maxRead=1;
+  reuse.incoming="HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nHTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
+  HttpRpcExchange persistent(reuse,"project123.supabase.co",key,5000,5000,true);
+  assert(persistent.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  assert(reuse.connects==1 && reuse.closes==0);
+  assert(persistent.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  assert(reuse.connects==1 && reuse.closes==1);
+  FakeTls stale;stale.allowReuse=true;stale.maxRead=1;stale.incoming="HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+  HttpRpcExchange uncertain(stale,"project123.supabase.co",key,5000,5000,true);
+  assert(uncertain.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  stale.failWrite=true;const int before=stale.connects;
+  assert(uncertain.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::NetworkError);
+  assert(stale.connects==before && stale.closes==1);
+  FakeTls expired;expired.allowReuse=true;expired.maxRead=1;expired.incoming="HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+  HttpRpcExchange aged(expired,"project123.supabase.co",key,5000,5000,true);
+  assert(aged.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  expired.time+=5000;assert(aged.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  assert(expired.connects==2 && expired.closes==1);
   std::cout<<"HTTP RPC exchange tests passed\n";
 }

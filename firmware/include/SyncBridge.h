@@ -49,6 +49,7 @@ class SyncNetworkWorker {
     : mailbox_(mailbox),exchange_(exchange),secret_(secret) {}
   SyncPlanner::Kind lastKind() const {return lastKind_;}
   RpcWorker::Outcome lastOutcome() const {return lastOutcome_;}
+  void closeConnection() {exchange_.close();}
   // Flush an already executed result without issuing or discarding an RPC.
   void flushPending() { if (pending_) publish(); }
   // When the network is unavailable, report a failed command so the counting

@@ -34,9 +34,10 @@ class NetworkTaskCoordinator {
     const uint32_t now=clock_.nowMillis();
     if(!wifi_.step(now)){worker_.flushPending();return;}
     if(wifi_.state()!=WifiSupervisor::State::Online) {
-      time_.invalidate();attempted_=false;worker_.failUnavailable();return;
+      worker_.closeConnection();time_.invalidate();attempted_=false;worker_.failUnavailable();return;
     }
     if(!time_.trusted()) {
+      worker_.closeConnection(); // bootstrap shares the same TCP/TLS resources
       if(!attempted_ || static_cast<uint32_t>(now-lastAttempt_)>=TIME_RETRY_MS) {
         (void)time_.refresh();
         // Backoff is measured from completion, including timeout duration.

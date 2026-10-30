@@ -56,8 +56,8 @@ std::atomic<bool> stopNetwork{false};
 std::atomic<bool> radioOnline{false},timeTrusted{false};
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0};
-std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0};
-std::atomic<int> barrierRpcKind{0},barrierRpcResult{1},barrierRpcStage{0},barrierRpcNet{1},barrierRpcHttp{0};
+std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0},rpcReuse{0};
+std::atomic<int> barrierRpcKind{0},barrierRpcResult{1},barrierRpcStage{0},barrierRpcNet{1},barrierRpcHttp{0},barrierRpcReuse{0};
 bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
@@ -91,15 +91,18 @@ void networkTask(void*) {
     rpcStage.store(static_cast<int>(networkExchange->lastStage()),std::memory_order_relaxed);
     rpcNet.store(static_cast<int>(networkExchange->lastStatus()),std::memory_order_relaxed);
     rpcHttp.store(networkExchange->lastHttpStatus(),std::memory_order_relaxed);
+    rpcReuse.store(networkExchange->lastReused()?1:0,std::memory_order_relaxed);
     if(static_cast<int>(networkWorker->lastKind())>=static_cast<int>(SyncPlanner::Kind::Freeze)) {
       barrierRpcKind.store(static_cast<int>(networkWorker->lastKind()),std::memory_order_relaxed);
       barrierRpcResult.store(static_cast<int>(networkWorker->lastOutcome().result),std::memory_order_relaxed);
       barrierRpcStage.store(static_cast<int>(networkExchange->lastStage()),std::memory_order_relaxed);
       barrierRpcNet.store(static_cast<int>(networkExchange->lastStatus()),std::memory_order_relaxed);
       barrierRpcHttp.store(networkExchange->lastHttpStatus(),std::memory_order_relaxed);
+      barrierRpcReuse.store(networkExchange->lastReused()?1:0,std::memory_order_relaxed);
     }
     vTaskDelay(1);
   }
+  networkWorker->closeConnection();
   vTaskDelete(nullptr);
 }
 const char* statusName(DeviceInput::Status s) {
@@ -136,7 +139,7 @@ void setup() {
   static MbedTlsSession tls(tcp);static VerifiedConnect verified(clock,tcp,resolved,tls);
   static TrustedTimeWindow window(monotonic,config.timeLifetimeMs,config.clockDriftPpm);
   static MbedTlsChannel channel(clock,scheduler,window,verified,tls,config.ca);
-  static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS,DATA_RPC_TIMEOUT_MS);
+  static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS,DATA_RPC_TIMEOUT_MS,true);
   static SyncNetworkWorker worker(mailbox,exchange,config.secret);
   static TimeProof proof(networkEntropy);static TimeBootstrapExchange bootstrap(clock,scheduler,tcp,resolved,proof);
   static TimeWindowSynchronizer sync(monotonic,window,bootstrap);
@@ -185,7 +188,7 @@ void loop() {
   }
   if(radioOnline.load() && now-lastRpcDiag>=5000 && now-lastStatus>=150 && now-lastStatus<300) {
     lastRpcDiag=now;char info[64];
-    snprintf(info,sizeof(info),"RPC_DIAG k=%d r=%d s=%d n=%d h=%d",rpcKind.load(),rpcResult.load(),rpcStage.load(),rpcNet.load(),rpcHttp.load());
+    snprintf(info,sizeof(info),"RPC_DIAG k=%d r=%d s=%d n=%d h=%d u=%d",rpcKind.load(),rpcResult.load(),rpcStage.load(),rpcNet.load(),rpcHttp.load(),rpcReuse.load());
     status(info);
   }
   if(radioOnline.load() && now-lastFreezeDiag>=5000 && now-lastStatus>=570 && now-lastStatus<670) {
@@ -195,7 +198,7 @@ void loop() {
   }
   if(radioOnline.load() && barrierRpcKind.load()!=0 && now-lastBarrierRpcDiag>=5000 && now-lastStatus>=850 && now-lastStatus<950) {
     lastBarrierRpcDiag=now;char info[64];
-    snprintf(info,sizeof(info),"BAR_RPC k=%d r=%d s=%d n=%d h=%d",barrierRpcKind.load(),barrierRpcResult.load(),barrierRpcStage.load(),barrierRpcNet.load(),barrierRpcHttp.load());
+    snprintf(info,sizeof(info),"BAR_RPC k=%d r=%d s=%d n=%d h=%d u=%d",barrierRpcKind.load(),barrierRpcResult.load(),barrierRpcStage.load(),barrierRpcNet.load(),barrierRpcHttp.load(),barrierRpcReuse.load());
     status(info);
   }
   delay(1);

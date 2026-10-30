@@ -19,7 +19,8 @@ struct Mailbox : SyncMailbox {
  bool publish(const Completion& v) override{if(hasResult||blockPublish)return false;result=v;hasResult=true;return true;}
 };
 struct Exchange : RpcExchange {
- int calls=0;
+ int calls=0;std::atomic<int> closes{0};
+ void close() override {++closes;}
  Response post(const char* endpoint,const char*,size_t,char* out,size_t cap) override {
   ++calls;
   const std::string body=strcmp(endpoint,"device_ingest")==0 ? "{\"binding_id\":\"20000000-0000-4000-8000-000000000001\",\"accepted_total\":7}" :"{\"desired_order_id\":\"00000000-0000-4000-8000-000000000001\",\"desired_binding_id\":\"20000000-0000-4000-8000-000000000001\",\"desired_binding_revision\":1}";
@@ -43,14 +44,15 @@ int main(){
  SyncNetworkWorker worker(mailbox,exchange,"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
  Lock lock;Station station;WifiSupervisor supervisor(station,"network","password");GuardedWifiSupervisor wifi(lock,supervisor);Clock clock;Time time;
  NetworkTaskCoordinator network(clock,wifi,time,worker);
- counting.step(0);assert(mailbox.hasCommand);network.step();assert(mailbox.hasResult && !mailbox.result.reply.success && exchange.calls==0);
+ counting.step(0);assert(mailbox.hasCommand);network.step();assert(exchange.closes==1 && mailbox.hasResult && !mailbox.result.reply.success && exchange.calls==0);
  counting.step(1);assert(counter.pending()==5 && !planner.faulted());
- counting.step(200);clock.now=200;station.online=true;network.step();assert(time.refreshes==1 && mailbox.hasResult && exchange.calls==0);
+ counting.step(200);clock.now=200;station.online=true;network.step();assert(exchange.closes==2 && time.refreshes==1 && mailbox.hasResult && exchange.calls==0);
  counting.step(201);counting.step(400);clock.now=400;network.step();assert(time.refreshes==1 && mailbox.hasResult);counting.step(401);
  // A time refresh blocks only the network task, not the counter task.
  counting.step(5200);assert(mailbox.hasCommand);clock.now=5200;time.success=true;time.block=true;
  std::thread networkThread([&]{network.step();});
  while(!time.entered.load())std::this_thread::yield();
+ assert(exchange.closes>=3); // Existing RPC socket must be closed before bootstrap owns the TCP transport.
  assert(planner.count(2)==DurableCounter::Result::Ok && counter.pending()==7);
  time.release=true;networkThread.join();assert(time.refreshes==2 && exchange.calls==1 && mailbox.hasResult);
  counting.step(5210);assert(counter.pending()==7 && !planner.faulted());
@@ -58,7 +60,8 @@ int main(){
  // response, even if Wi-Fi drops; it is not re-executed or replaced by failure.
  counting.step(5700);assert(mailbox.hasCommand && mailbox.command.kind==SyncPlanner::Kind::Upload);
  mailbox.blockPublish=true;clock.now=5700;network.step();assert(exchange.calls==2 && !mailbox.hasResult);
- mailbox.blockPublish=false;station.online=false;clock.now=5701;network.step();
+ mailbox.blockPublish=false;station.online=false;clock.now=5701;const int beforeOffline=exchange.closes;network.step();
+ assert(exchange.closes==beforeOffline+1);
  assert(mailbox.hasResult && mailbox.result.reply.success && exchange.calls==2 && !time.trusted());
  counting.step(5702);assert(counter.pending()==0 && !planner.faulted());
  // Busy radio gate makes no Wi-Fi state transition, and no queued RPC is run.

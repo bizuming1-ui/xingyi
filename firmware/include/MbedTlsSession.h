@@ -60,7 +60,7 @@ class MbedTlsSession {
     mbedtls_ssl_conf_authmode(&config_,MBEDTLS_SSL_VERIFY_REQUIRED);
     // Some ESP SDKs compile mbedTLS without built-in date checks. The
     // verification callback checks every certificate in the verified chain.
-    sawLeaf_=false;mbedtls_ssl_conf_verify(&config_,&verifyDate,this);
+    sawLeaf_=false;hasValidity_=false;mbedtls_ssl_conf_verify(&config_,&verifyDate,this);
     mbedtls_ssl_conf_min_version(&config_,MBEDTLS_SSL_MAJOR_VERSION_3,MBEDTLS_SSL_MINOR_VERSION_3);
     mbedtls_ssl_conf_ca_chain(&config_,&ca_,nullptr);
     mbedtls_ssl_conf_rng(&config_,mbedtls_ctr_drbg_random,&rng_);
@@ -78,6 +78,15 @@ class MbedTlsSession {
       state_=State::Verified;
     } else if(rc!=MBEDTLS_ERR_SSL_WANT_READ && rc!=MBEDTLS_ERR_SSL_WANT_WRITE)fail();
     return state_;
+  }
+  // Recheck the complete verified chain's date intersection against the
+  // current authenticated clock window before every reused operation.
+  bool datesStillValid() {
+    if(state_!=State::Verified || !window_ || !sawLeaf_ || !hasValidity_)return false;
+    TrustedTimeWindow::Bounds b{};int earliest[6]{},latest[6]{};
+    if(!window_->bounds(b) || b.latestMs<b.earliestMs || !utcFields(b.earliestMs/1000,earliest) ||
+       !utcFields(b.latestMs/1000+(b.latestMs%1000!=0),latest))return false;
+    return compare(validFrom_,earliest)<=0 && compare(validTo_,latest)>=0;
   }
   // After WantIo, retry the same buffer and length until this write completes.
   Result write(const uint8_t* data,size_t length) {
@@ -100,6 +109,7 @@ class MbedTlsSession {
  private:
   NonblockingTcp& tcp_;State state_=State::Idle;bool sawLeaf_=false;TrustedTimeWindow* window_=nullptr;
   mbedtls_ssl_context ssl_;mbedtls_ssl_config config_;mbedtls_x509_crt ca_;
+  bool hasValidity_=false;mbedtls_x509_time validFrom_{},validTo_{};
   mbedtls_entropy_context entropy_;mbedtls_ctr_drbg_context rng_;
   bool fail(){tcp_.close();state_=State::Failed;return false;}
   Result interpret(int rc) {
@@ -128,6 +138,11 @@ class MbedTlsSession {
     auto* self=static_cast<MbedTlsSession*>(context);
     if(!cert || !flags || depth<0)return MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
     if(depth==0)self->sawLeaf_=true;
+    if(!self->hasValidity_) {self->validFrom_=cert->valid_from;self->validTo_=cert->valid_to;self->hasValidity_=true;}
+    else {
+      if(compareTimes(cert->valid_from,self->validFrom_)>0)self->validFrom_=cert->valid_from;
+      if(compareTimes(cert->valid_to,self->validTo_)<0)self->validTo_=cert->valid_to;
+    }
     int earliest[6]{},latest[6]{};
     if(self->window_) {
       TrustedTimeWindow::Bounds bounds{};
@@ -154,6 +169,9 @@ class MbedTlsSession {
     if(t<0 || static_cast<uint64_t>(t)!=seconds || !gmtime_r(&t,&utc))return false;
     out[0]=utc.tm_year+1900;out[1]=utc.tm_mon+1;out[2]=utc.tm_mday;
     out[3]=utc.tm_hour;out[4]=utc.tm_min;out[5]=utc.tm_sec;return true;
+  }
+  static int compareTimes(const mbedtls_x509_time& a,const mbedtls_x509_time& b) {
+    const int values[]={b.year,b.mon,b.day,b.hour,b.min,b.sec};return compare(a,values);
   }
   static int compare(const mbedtls_x509_time& t,const int current[6]) {
     const int values[]={t.year,t.mon,t.day,t.hour,t.min,t.sec};

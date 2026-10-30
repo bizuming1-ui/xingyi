@@ -76,13 +76,14 @@ class HttpResponseDecoder {
   }
   int statusCode() const { return status_; }
   size_t length() const { return length_; }
+  bool reusable() const {return state_==State::Done && !connectionClose_;}
  private:
   enum class State { Headers, Body, ChunkSize, ChunkSizeLF, ChunkBody, ChunkCR, ChunkLF, FinalCR, FinalLF, Done, Invalid, TooLarge };
   State state_=State::Headers;
   char* output_; size_t capacity_;
   char headers_[MAX_HEADER_BYTES+1]{}; size_t headerSize_=0;
   size_t length_=0, expected_=0, chunkSize_=0, remaining_=0; unsigned digits_=0;
-  int status_=0;
+  int status_=0;bool connectionClose_=false,seenConnection_=false;
   static int hex(unsigned char c) {
     if(c>='0' && c<='9')return c-'0';
     if(c>='a' && c<='f')return c-'a'+10;
@@ -133,6 +134,12 @@ class HttpResponseDecoder {
         }
       } else if(equalNoCase(line,"transfer-encoding")) {
         if(hasTransfer || !equalNoCase(value,"chunked")){state_=State::Invalid;return;}hasTransfer=true;
+      } else if(equalNoCase(line,"connection")) {
+        // Only an unambiguous keep-alive header permits reuse; HTTP/1.1 with
+        // no Connection header is persistent by default. Unknown or duplicate
+        // tokens conservatively close the socket after the response.
+        if(seenConnection_ || !equalNoCase(value,"keep-alive"))connectionClose_=true;
+        seenConnection_=true;
       } else if(equalNoCase(line,"content-encoding") && !equalNoCase(value,"identity")) {
         state_=State::Invalid;return;
       }

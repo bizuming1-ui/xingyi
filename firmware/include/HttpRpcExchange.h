@@ -17,6 +17,7 @@ class VerifiedTlsChannel {
   virtual int write(const char* data,size_t length,uint32_t timeoutMs)=0;
   virtual int read(char* data,size_t capacity,uint32_t timeoutMs)=0;
   virtual void close()=0;
+  virtual bool canReuse(){return false;}
 };
 
 // Fixed-origin, one-request-per-connection HTTP exchange. No redirect handling.
@@ -24,14 +25,17 @@ class VerifiedTlsChannel {
 // Runtime must provide a real verified TLS channel and synchronized clock.
 class HttpRpcExchange final : public RpcExchange {
  public:
-  HttpRpcExchange(VerifiedTlsChannel& channel,const char* host,const char* publishableKey,uint32_t timeoutMs,uint32_t dataTimeoutMs=0)
-    : channel_(channel),host_(host),key_(publishableKey),timeoutMs_(timeoutMs),dataTimeoutMs_(dataTimeoutMs?dataTimeoutMs:timeoutMs),activeTimeoutMs_(timeoutMs) {}
+  HttpRpcExchange(VerifiedTlsChannel& channel,const char* host,const char* publishableKey,uint32_t timeoutMs,uint32_t dataTimeoutMs=0,bool keepAlive=false)
+    : channel_(channel),host_(host),key_(publishableKey),timeoutMs_(timeoutMs),dataTimeoutMs_(dataTimeoutMs?dataTimeoutMs:timeoutMs),activeTimeoutMs_(timeoutMs),keepAlive_(keepAlive) {}
+  ~HttpRpcExchange() override {close();}
+  void close() override {if(connected_){channel_.close();connected_=false;}}
   enum class Stage { Idle, Validate, Connect, Send, Receive, Complete };
   Stage lastStage() const {return stage_;}
   Status lastStatus() const {return status_;}
   int lastHttpStatus() const {return httpStatus_;}
+  bool lastReused() const {return lastReused_;}
   Response post(const char* endpoint,const char* json,size_t jsonLength,char* response,size_t responseCapacity) override {
-    Response result{};stage_=Stage::Validate;status_=Status::NetworkError;httpStatus_=0;
+    Response result{};stage_=Stage::Validate;status_=Status::NetworkError;httpStatus_=0;lastReused_=false;
     struct Capture { HttpRpcExchange& owner; Response& response;
       ~Capture(){owner.status_=response.status;owner.httpStatus_=response.httpStatus;}
     } capture{*this,result};
@@ -47,14 +51,19 @@ class HttpRpcExchange final : public RpcExchange {
                       strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Abort))==0)?dataTimeoutMs_:timeoutMs_;
     char headers[768]{};
     const int n=snprintf(headers,sizeof(headers),
-      "POST /rest/v1/rpc/%s HTTP/1.1\r\nHost: %s\r\napikey: %s\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: close\r\nContent-Length: %lu\r\n\r\n",
-      endpoint,host_,key_,static_cast<unsigned long>(jsonLength));
+      "POST /rest/v1/rpc/%s HTTP/1.1\r\nHost: %s\r\napikey: %s\r\nContent-Type: application/json\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nConnection: %s\r\nContent-Length: %lu\r\n\r\n",
+      endpoint,host_,key_,keepAlive_?"keep-alive":"close",static_cast<unsigned long>(jsonLength));
     if(n<0 || static_cast<size_t>(n)>=sizeof(headers)) return result;
     const uint32_t start=channel_.nowMillis();
-    struct Closer { VerifiedTlsChannel& ch; explicit Closer(VerifiedTlsChannel& c):ch(c){} ~Closer(){ch.close();} } closer(channel_);
+    struct Closer { HttpRpcExchange& owner; bool keep; explicit Closer(HttpRpcExchange& x):owner(x),keep(false){} ~Closer(){if(!keep)owner.close();} } closer(*this);
     stage_=Stage::Connect;
-    const auto connected=channel_.connectVerified(host_,443,activeTimeoutMs_);
-    if(connected!=VerifiedTlsChannel::Connect::Ok) { result.status=connected==VerifiedTlsChannel::Connect::Timeout?Status::Timeout:Status::NetworkError; return result; }
+    if(connected_ && (!keepAlive_ || static_cast<uint32_t>(start-lastUsed_)>=5000 || !channel_.canReuse()))close();
+    lastReused_=connected_;
+    if(!connected_) {
+      const auto connected=channel_.connectVerified(host_,443,activeTimeoutMs_);
+      if(connected!=VerifiedTlsChannel::Connect::Ok) {channel_.close();result.status=connected==VerifiedTlsChannel::Connect::Timeout?Status::Timeout:Status::NetworkError;return result;}
+      connected_=true;
+    }
     if(!remaining(start)) { result.status=Status::Timeout; return result; }
     stage_=Stage::Send;
     int failure=writeAll(headers,static_cast<size_t>(n),start);
@@ -73,7 +82,10 @@ class HttpRpcExchange final : public RpcExchange {
       }
       const auto parsed=parser.feed(block.data,static_cast<size_t>(count));
       if(parsed==HttpResponseDecoder::Result::Complete) {
-        stage_=Stage::Complete;result.status=Status::Ok;result.httpStatus=parser.statusCode();result.length=parser.length();return result;
+        stage_=Stage::Complete;result.status=Status::Ok;result.httpStatus=parser.statusCode();result.length=parser.length();
+        closer.keep=keepAlive_ && parser.reusable() && result.httpStatus>=200 && result.httpStatus<300 && channel_.canReuse();
+        if(closer.keep)lastUsed_=channel_.nowMillis();
+        return result;
       }
       if(parsed==HttpResponseDecoder::Result::TooLarge){result.status=Status::ResponseTooLarge;return result;}
       if(parsed==HttpResponseDecoder::Result::Invalid){result.status=Status::NetworkError;return result;}
@@ -81,6 +93,7 @@ class HttpRpcExchange final : public RpcExchange {
   }
  private:
   VerifiedTlsChannel& channel_; const char* host_;const char* key_;uint32_t timeoutMs_,dataTimeoutMs_,activeTimeoutMs_;
+  bool keepAlive_=false,connected_=false,lastReused_=false;uint32_t lastUsed_=0;
   Stage stage_=Stage::Idle;Status status_=Status::NetworkError;int httpStatus_=0;
   uint32_t remaining(uint32_t start) {const uint32_t elapsed=channel_.nowMillis()-start;return elapsed>=activeTimeoutMs_?0:activeTimeoutMs_-elapsed;}
   int writeAll(const char* data,size_t length,uint32_t start) {

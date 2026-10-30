@@ -41,6 +41,10 @@ with tempfile.TemporaryDirectory() as tmp:
         '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-http'))
     run('g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread',
         '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'), '-I', arduino,
+        str(root / 'tests/mbedtls_keepalive.cpp'), '-L', str(mbed / 'library'),
+        '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-keepalive'))
+    run('g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread',
+        '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'), '-I', arduino,
         str(root / 'tests/time_bootstrap.cpp'), '-L', str(mbed / 'library'),
         '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-bootstrap'))
     for name in ('ca', 'wrong'):
@@ -182,6 +186,31 @@ with tempfile.TemporaryDirectory() as tmp:
         stop.set()
         listener.close()
         thread.join(timeout=3)
+
+    # A verified HTTPS connection serves two sequential framed requests. Test
+    # date-window invalidation before reuse; no real credentials are involved.
+    listener = socket.socket();listener.bind(('127.0.0.1',0));listener.listen();listener.settimeout(10)
+    keep_port=listener.getsockname()[1];received_requests=[];server_errors=[]
+    def keep_server():
+        try:
+            raw,_=listener.accept();raw.settimeout(5)
+            with context.wrap_socket(raw,server_side=True) as conn:
+                buf=b''
+                for _ in range(2):
+                    while b'\r\n\r\n' not in buf: buf+=conn.recv(4096)
+                    head,_,body=buf.partition(b'\r\n\r\n')
+                    count=int(next(line.split(b':',1)[1] for line in head.split(b'\r\n') if line.lower().startswith(b'content-length:')))
+                    while len(body)<count:body+=conn.recv(4096)
+                    assert b'Connection: keep-alive' in head and body[:count]==b'{}'
+                    received_requests.append(1);buf=body[count:]
+                    conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}')
+        except Exception as e:server_errors.append(str(e))
+    thread=threading.Thread(target=keep_server,daemon=True);thread.start()
+    try:
+        subprocess.run([str(p/'test-keepalive'),str(keep_port),str(p/'ca.crt')],check=True,timeout=20)
+        thread.join(timeout=6);assert not server_errors,server_errors
+        assert len(received_requests)==2
+    finally:listener.close()
 
     # Expired test leaf: date exception applies only to this restricted endpoint;
     # CA and host validation still apply and the signed reply is mandatory.
