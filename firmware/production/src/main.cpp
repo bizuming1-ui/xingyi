@@ -79,7 +79,7 @@ RTC_NOINIT_ATTR WatchdogResetMarker::Record watchdogResetRecord;
 WatchdogResetMarker watchdogResetMarker(watchdogResetRecord);
 bool previousWatchdogAttempt=false;
 std::atomic<bool> radioOnline{false},timeTrusted{false};
-std::atomic<int> wifiPsDisabled{-1};
+std::atomic<int> wifiPsDisabled{-1},wifiPsSet{-2};
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0},timeBudget{0};
 std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0},rpcReuse{0};
@@ -143,6 +143,7 @@ void networkTask(void*) {
     networkProgress.store(millis(),std::memory_order_relaxed);
     network->step();
     wifiPsDisabled.store(networkStation->powerSaveDiagnostic(),std::memory_order_relaxed);
+    wifiPsSet.store(networkStation->powerSaveSetResult(),std::memory_order_relaxed);
     networkProgress.store(millis(),std::memory_order_relaxed);
     // Updates are informational only; they cannot prove a live freeze lease.
     const bool online=networkWifi->state()==WifiSupervisor::State::Online;
@@ -328,7 +329,7 @@ void loop() {
   }
   static uint32_t lastWifiDiag=0;
   if(now-lastWifiDiag>=15000 && now-lastStatus>=700 && now-lastStatus<800) {
-    char info[48];snprintf(info,sizeof(info),"WIFI_DIAG ps_off=%d",wifiPsDisabled.load(std::memory_order_relaxed));
+    char info[64];snprintf(info,sizeof(info),"WIFI_DIAG ps_off=%d set=%d",wifiPsDisabled.load(std::memory_order_relaxed),wifiPsSet.load(std::memory_order_relaxed));
     status(info);lastWifiDiag=now;
   }
   // A local counter update is informative only: it is NOT the server draft.
