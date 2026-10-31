@@ -36,6 +36,16 @@ int main(){
  assert(!renewing.replaceVerified(1,169900,170000));assert(!renewing.bounds(bounds));
  renewClock.now=200000;assert(renewing.acceptVerified(epoch,199900,200000));
  renewClock.now=199999;assert(!renewing.replaceVerified(epoch,199000,199999));assert(!renewing.bounds(bounds));
+ // A fresh authenticated proof can arrive after the old window's hard
+ // expiry; it creates a new bounded window, never extends the old one.
+ Clock lateClock;lateClock.now=1000;TrustedTimeWindow late(lateClock,10000,1000);
+ assert(late.acceptVerified(epoch,900,1000));lateClock.now=10999;assert(late.bounds(bounds));
+ lateClock.now=11100;assert(late.replaceVerified(epoch+10,10999,11100));
+ assert(late.bounds(bounds));lateClock.now=21100;assert(!late.bounds(bounds));
+ lateClock.now=30000;assert(late.acceptVerified(epoch,29900,30000));lateClock.now=40001;
+ assert(!late.replaceVerified(1,39999,40001));assert(!late.bounds(bounds));
+ lateClock.now=50000;assert(late.acceptVerified(epoch,49900,50000));lateClock.now=60001;
+ assert(!late.replaceVerified(epoch+10,49999,60001));assert(!late.bounds(bounds));
  // A slow, valid proof widens the uncertainty interval by its full trip.
  clock.now=25000;assert(t.acceptVerified(epoch,14000,25000));assert(t.bounds(bounds));
  assert(bounds.latestMs>=epoch*1000+12000);

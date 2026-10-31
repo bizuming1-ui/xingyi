@@ -32,11 +32,11 @@ struct Lock : RadioLifecycleLock {bool busy=false;bool tryLock() override{if(bus
 struct Station : WifiStation {bool online=false;int starts=0;bool start(const char*,const char*) override{++starts;return true;}bool connected() override{return online;}void disconnect() override{}};
 struct Clock : NetworkTaskClock {std::atomic<uint32_t> now{0};uint32_t nowMillis() override{return now.load();}};
 struct Time : NetworkTimeService {
- std::atomic<bool> valid{false},block{false},entered{false},release{false};int refreshes=0,invalidations=0,preserves=0;bool success=false,due=false;
+ std::atomic<bool> valid{false},block{false},entered{false},release{false};int refreshes=0,invalidations=0,preserves=0;bool success=false,due=false,expireDuringPreserve=false;
  bool trusted() override{return valid.load();}
  bool refresh() override{++refreshes;if(block.load()){entered=true;while(!release.load())std::this_thread::yield();}valid=success;return success;}
  bool refreshDue() override{return due;}
- bool refreshPreserving() override{++preserves;return success;}
+ bool refreshPreserving() override{++preserves;if(expireDuringPreserve)valid=false;return success;}
  void invalidate() override{valid=false;++invalidations;}
 };
 int main(){
@@ -111,5 +111,14 @@ int main(){
  time4.valid=false;time4.success=false;assert(mailbox4.collect(done));assert(mailbox4.submit(upload));
  clock4.now=5002;priority.step();assert(time4.refreshes==1 && exchange4.calls==2);
  assert(mailbox4.hasResult && !mailbox4.result.reply.success);
+ // Proactive timeout/expiry immediately unlocks one hard recovery attempt,
+ // after which normal backoff prevents a tight retry loop.
+ Lock lock5;Station station5;station5.online=true;WifiSupervisor sup5(station5,"network","password");
+ GuardedWifiSupervisor wifi5(lock5,sup5);Clock clock5;Time time5;Mailbox mailbox5;Exchange exchange5;
+ SyncNetworkWorker worker5(mailbox5,exchange5,"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+ NetworkTaskCoordinator expiry(clock5,wifi5,time5,worker5);expiry.step();
+ time5.valid=true;time5.due=true;time5.expireDuringPreserve=true;clock5.now=1;expiry.step();
+ assert(time5.preserves==1 && !time5.trusted());clock5.now=2;expiry.step();assert(time5.refreshes==1);
+ clock5.now=3;expiry.step();assert(time5.refreshes==1);clock5.now=5002;expiry.step();assert(time5.refreshes==2);
  std::cout<<"network task coordination and offline count tests passed\n";
 }

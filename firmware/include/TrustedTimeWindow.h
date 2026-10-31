@@ -55,8 +55,14 @@ class TrustedTimeWindow {
   // Replace atomically only with a fresh verified proof. Invalid timing or
   // clock faults fail closed. The caller owns proof authentication.
   bool replaceVerified(uint64_t serverSeconds,uint64_t requestStartedMs,uint64_t responseReceivedMs) {
-    Bounds existing{};
-    if(!bounds(existing))return false; // preserve mode requires an existing valid window
+    // A refresh can finish just after the old window expires. Do not extend
+    // or use the old proof: a fresh authenticated proof may establish its own
+    // window, provided this clock did not regress or fault in the meantime.
+    if(!valid_)return false;
+    uint64_t now=0;
+    if(!clock_.read(now) || now<lastRead_ || now<received_ || requestStartedMs<lastRead_) {
+      invalidate();return false;
+    }
     TrustedTimeWindow candidate(clock_,lifetime_,driftPpm_);
     if(!candidate.acceptVerified(serverSeconds,requestStartedMs,responseReceivedMs)) {
       invalidate();return false;

@@ -63,6 +63,15 @@ int main(int argc,char** argv){
  assert(sync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000)==R::Ok);
  TrustedTimeWindow::Bounds bounds{};assert(window.bounds(bounds));
  assert(bounds.earliestMs>=1704067200000ULL && bounds.latestMs>bounds.earliestMs);
+ // A slow, authenticated replacement that started while trusted may finish
+ // after the old hard expiry. It must establish a fresh window from its own
+ // proof, while an invalid proof must never restore trust.
+ TrustedTimeWindow shortWindow(clock,3000,1000);TimeWindowSynchronizer shortSync(clock,shortWindow,bootstrap);
+ assert(shortSync.refresh("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,3000)==R::Ok);
+ entropy.pattern=0x12;
+ assert(shortSync.refreshPreserving("project123.supabase.co","sb_publishable_test",ca.c_str(),id,secret,4500)==R::Ok);
+ assert(shortWindow.bounds(bounds) && shortSync.lastStage()==TimeBootstrapExchange::Stage::Complete);
+ entropy.pattern=1;
  // Bad new proof must not extend or destroy a still-valid old proof.
  assert(sync.refreshPreserving("project123.supabase.co","sb_publishable_test",ca.c_str(),id,"ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",3000)==R::InvalidProof);
  assert(window.bounds(bounds));

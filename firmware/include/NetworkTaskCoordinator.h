@@ -65,7 +65,10 @@ class NetworkTaskCoordinator {
       deferred_=false;worker_.closeConnection();timeStart_=clock_.nowMillis();timePreserving_=true;
       (void)time_.refreshPreserving();timeEnd_=clock_.nowMillis();++timeSeq_;
       attempted_=true;lastAttempt_=clock_.nowMillis();
-      if(!time_.trusted()){worker_.failUnavailable();return;}
+      // Proactive backoff must not add another five seconds once the old
+      // proof has expired. Give hard recovery one immediate opportunity;
+      // subsequent failed hard attempts still use their normal backoff.
+      if(!time_.trusted()){attempted_=false;worker_.failUnavailable();return;}
     }
     worker_.step();
   }
