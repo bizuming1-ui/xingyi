@@ -42,9 +42,16 @@ class HttpRpcExchange final : public RpcExchange {
   int sentMillis() const {return sentMs_;}
   int firstByteMillis() const {return firstMs_;}
   unsigned receivedBytes() const {return receivedBytes_;}
-  void validPoll() override {if(pollYield_)pollYield_->validPoll();}
+  void validPoll() override {
+    if(pollYield_)pollYield_->validPoll();
+    // Only a fully decoded successful status response may train this hint.
+    if(pollReceiveCandidate_>=0) {
+      const unsigned v=static_cast<unsigned>(pollReceiveCandidate_);
+      pollGraceMs_=v<250?250:(v>1500?1500:v);
+    }
+  }
   Response post(const char* endpoint,const char* json,size_t jsonLength,char* response,size_t responseCapacity) override {
-    Response result{};stage_=Stage::Validate;status_=Status::NetworkError;httpStatus_=0;lastReused_=false;lastPollYielded_=false;connectMs_=sentMs_=firstMs_=-1;receivedBytes_=0;
+    Response result{};stage_=Stage::Validate;status_=Status::NetworkError;httpStatus_=0;lastReused_=false;lastPollYielded_=false;connectMs_=sentMs_=firstMs_=-1;receivedBytes_=0;pollReceiveCandidate_=-1;
     struct Capture { HttpRpcExchange& owner; Response& response;
       ~Capture(){owner.status_=response.status;owner.httpStatus_=response.httpStatus;}
     } capture{*this,result};
@@ -66,7 +73,7 @@ class HttpRpcExchange final : public RpcExchange {
     const bool isPoll=strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Poll))==0;
     if(isPoll && pollYield_)pollYield_->beginPoll();
     const uint32_t start=channel_.nowMillis();
-    GraceInterrupt grace(channel_,pollYield_);
+    GraceInterrupt grace(channel_,pollYield_,pollGraceMs_);
     struct Timing {HttpRpcExchange& owner;uint32_t start;~Timing(){if(owner.stage_==Stage::Connect && owner.connectMs_<0)owner.connectMs_=static_cast<int>(owner.channel_.nowMillis()-start);}} timing{*this,start};
     struct Closer { HttpRpcExchange& owner; bool keep; explicit Closer(HttpRpcExchange& x):owner(x),keep(false){} ~Closer(){if(!keep)owner.close();} } closer(*this);
     stage_=Stage::Connect;
@@ -111,6 +118,7 @@ class HttpRpcExchange final : public RpcExchange {
       receivedBytes_+=static_cast<unsigned>(count);
       const auto parsed=parser.feed(block.data,static_cast<size_t>(count));
       if(parsed==HttpResponseDecoder::Result::Complete) {
+        if(isPoll && sentMs_>=0)pollReceiveCandidate_=static_cast<int>(channel_.nowMillis()-start)-sentMs_;
         stage_=Stage::Complete;result.status=Status::Ok;result.httpStatus=parser.statusCode();result.length=parser.length();
         closer.keep=keepAlive_ && parser.reusable() && result.httpStatus>=200 && result.httpStatus<300 && channel_.canReuse();
         if(closer.keep)lastUsed_=channel_.nowMillis();
@@ -125,20 +133,21 @@ class HttpRpcExchange final : public RpcExchange {
   // needless TLS reconnection. This is a bounded heuristic, not a guarantee.
   class GraceInterrupt final : public ReadInterrupt {
    public:
-    GraceInterrupt(VerifiedTlsChannel& c,PollYieldPolicy* p):channel_(c),policy_(p){}
+    GraceInterrupt(VerifiedTlsChannel& c,PollYieldPolicy* p,uint32_t delay):channel_(c),policy_(p),delay_(delay){}
     bool interrupted() const override {
       if(!policy_ || !policy_->interrupted())return false;
       const uint32_t now=channel_.nowMillis();
       if(!seen_){seen_=true;at_=now;return false;}
-      return static_cast<uint32_t>(now-at_)>=250;
+      return static_cast<uint32_t>(now-at_)>=delay_;
     }
    private:
-    VerifiedTlsChannel& channel_;PollYieldPolicy* policy_;mutable bool seen_=false;mutable uint32_t at_=0;
+    VerifiedTlsChannel& channel_;PollYieldPolicy* policy_;uint32_t delay_;mutable bool seen_=false;mutable uint32_t at_=0;
   };
   VerifiedTlsChannel& channel_; const char* host_;const char* key_;uint32_t timeoutMs_,dataTimeoutMs_,activeTimeoutMs_;
   bool keepAlive_=false,connected_=false,lastReused_=false,lastPollYielded_=false;PollYieldPolicy* pollYield_=nullptr;uint32_t lastUsed_=0;
   Stage stage_=Stage::Idle;Status status_=Status::NetworkError;int httpStatus_=0;
   int connectMs_=-1,sentMs_=-1,firstMs_=-1;unsigned receivedBytes_=0;
+  int pollReceiveCandidate_=-1;uint32_t pollGraceMs_=250;
   uint32_t remaining(uint32_t start) {const uint32_t elapsed=channel_.nowMillis()-start;return elapsed>=activeTimeoutMs_?0:activeTimeoutMs_-elapsed;}
   int writeAll(const char* data,size_t length,uint32_t start) {
     size_t sent=0;

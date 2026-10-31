@@ -10,11 +10,11 @@ struct FakeTls : VerifiedTlsChannel {
   Connect connectVerified(const char* host,uint16_t port,uint32_t timeout) override {++connects;if(countOnConnect){countOnConnect->accepted();countOnConnect=nullptr;}assert(strcmp(host,"project123.supabase.co")==0 && port==443 && timeout>0);return failConnect?Connect::Error:Connect::Ok;}
   int write(const char* data,size_t length,uint32_t timeout) override {assert(timeout);++calls;if(failWrite)return -1;size_t n=length<static_cast<size_t>(maxWrite)?length:static_cast<size_t>(maxWrite);sent.append(data,n);++time;return static_cast<int>(n);}
   int read(char* out,size_t cap,uint32_t timeout) override {assert(timeout);++calls;if(timeoutRead)return -2;if(late)time+=timeout;else {time+=readDelay+1;readDelay=0;}if(cursor==incoming.size())return 0;size_t n=incoming.size()-cursor;if(n>cap)n=cap;if(n>static_cast<size_t>(maxRead))n=maxRead;memcpy(out,incoming.data()+cursor,n);cursor+=n;return static_cast<int>(n);}
-  PollYieldPolicy* simulateCount=nullptr;int interruptedReads=0;bool simulateStall=false;PollYieldPolicy* countOnConnect=nullptr;
+  PollYieldPolicy* simulateCount=nullptr;int interruptedReads=0;bool simulateStall=false;uint32_t stallMs=250;PollYieldPolicy* countOnConnect=nullptr;
   int readInterruptible(char* out,size_t cap,uint32_t timeout,const ReadInterrupt* interrupt) override {
     if(simulateCount){simulateCount->accepted();simulateCount=nullptr;}
     if(interrupt && interrupt->interrupted()){++interruptedReads;return -3;}
-    if(simulateStall && interrupt){time+=250;if(interrupt->interrupted()){++interruptedReads;return -3;}}
+    if(simulateStall && interrupt){time+=stallMs;if(interrupt->interrupted()){++interruptedReads;return -3;}}
     return read(out,cap,timeout);
   }
   void close() override {++closes;}
@@ -134,6 +134,22 @@ int main(){
   HttpRpcExchange closed(noReuse,"project123.supabase.co",key,5000,5000,false,&noReusePriority);
   assert(closed.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Interrupted);
   assert(noReuse.closes==1 && noReuse.sent.empty());
+  // A validated slow poll raises the bounded grace to its observed receive
+  // duration. A response within that window keeps the connection; if it
+  // stalls longer, it is cancelled. Failed/undecodable replies never train it.
+  FakeTls adapt;adapt.allowReuse=true;adapt.maxRead=256;adapt.readDelay=1000;
+  PollYieldPolicy adaptPolicy;
+  adapt.incoming="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\n\r\n"+body;
+  HttpRpcExchange adaptive(adapt,"project123.supabase.co",key,5000,5000,true,&adaptPolicy);
+  assert(RpcWorker::execute(adaptive,cmd,secret,reply).result==RpcWorker::Result::Ok);
+  adapt.incoming="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\n\r\n"+body;adapt.cursor=0;
+  adapt.simulateCount=&adaptPolicy;adapt.simulateStall=true;adapt.stallMs=500;
+  assert(RpcWorker::execute(adaptive,cmd,secret,reply).result==RpcWorker::Result::Ok);
+  assert(!adaptive.lastPollYielded() && adapt.interruptedReads==0 && adapt.connects==1);
+  // Re-trained by the last 500 ms status, so 600 ms now permits a yield.
+  adapt.simulateCount=&adaptPolicy;adapt.stallMs=600;
+  assert(RpcWorker::execute(adaptive,cmd,secret,reply).result==RpcWorker::Result::TransportError);
+  assert(adaptive.lastPollYielded() && adapt.interruptedReads==1);
   // Uploads, renewals and all other requests do not use the interruptible read.
   preempt.incoming="HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";preempt.cursor=0;preempt.simulateCount=&priority;
   assert(prioritized.post("device_ingest","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
