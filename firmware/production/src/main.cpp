@@ -7,6 +7,9 @@
 #include <mbedtls/x509_crt.h>
 #include <esp_system.h>
 #include <esp_attr.h>
+#if ARDUINO_USB_CDC_ON_BOOT && CONFIG_IDF_TARGET_ESP32S3
+#include "hal/usb_serial_jtag_ll.h"
+#endif
 #include <atomic>
 #include "config.local.h"
 #include "RuntimeConfig.h"
@@ -26,6 +29,7 @@
 #include "AuthenticatedNetworkTime.h"
 #include "MonitorEvent.h"
 #include "BestEffortSerial.h"
+#include "UsbSerialRecovery.h"
 #include "ProgressWatchdog.h"
 
 namespace {
@@ -63,6 +67,7 @@ SyncNetworkWorker* networkWorker=nullptr;
 HttpRpcExchange* networkExchange=nullptr;
 std::atomic<bool> stopNetwork{false};
 std::atomic<bool> watchdogEnabled{false},watchdogHold{false};
+std::atomic<uint32_t> watchdogAttempts{0};
 std::atomic<uint32_t> countProgress{0},networkProgress{0};
 // Retained across software reset only on supported ESP32-S3 hardware. Never
 // stored in counter NVS; brownouts/power loss need not preserve this budget.
@@ -176,6 +181,7 @@ void watchdogTask(void*) {
     const uint32_t now=millis();
     const bool healthy=active && static_cast<uint32_t>(now-count)<5000 && static_cast<uint32_t>(now-net)<30000;
     watchdogBudget.observe(now,healthy);
+    watchdogAttempts.store(watchdogBudget.attempts(),std::memory_order_relaxed);
     const bool available=watchdogBudget.available();
     watchdogHold.store(active && !available,std::memory_order_relaxed);
     const bool pressed=digitalRead(BUTTON_PIN)==LOW;
@@ -255,6 +261,23 @@ void setup() {
   status("Test candidate started; do not use in production");
 }
 void loop() {
+#if ARDUINO_USB_CDC_ON_BOOT && CONFIG_IDF_TARGET_ESP32S3
+  // Arduino 2.0.17 HWCDC can leave pending TX with the IN_EMPTY interrupt
+  // disabled. Re-kick its normal ISR when disconnected or buffer-starved;
+  // never clear queues, touch NVS, reset USB, or write to a full TX ring.
+  // Rate limit even while monitor->drain() is retrying every loop.
+  static UsbSerialRecovery usbRecovery;
+  if(usbRecovery.due(millis())) {
+    // Same zero-timeout HWCDC mutex as normal logging.
+    const bool plugged=HWCDC::isPlugged();
+    const bool ready=plugged && static_cast<bool>(Serial);
+    const int space=ready?Serial.availableForWrite():0;
+    if(UsbSerialRecovery::shouldKick(plugged,ready,space)) {
+      usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+      usb_serial_jtag_ll_txfifo_flush();
+    }
+  }
+#endif
   if(!initialized){const uint32_t now=millis();if(now-lastStatus>=5000){lastStatus=now;status(startupFault);}delay(100);return;}
   const uint32_t now=millis();
   const auto sample=input->tick(digitalRead(BUTTON_PIN)==LOW,now);
@@ -284,6 +307,9 @@ void loop() {
   if(now-lastMonitorNotice>=15000) {
     char info[64];snprintf(info,sizeof(info),"MON v=1 t=%lu lost=%lu",static_cast<unsigned long>(now),static_cast<unsigned long>(rpcMonitor->lost()));
     status(info);lastMonitorNotice=now;
+    // A periodic boot reason survives late serial attachment, but SW reset is
+    // not by itself evidence that the progress supervisor caused the reset.
+    char wd[80];snprintf(wd,sizeof(wd),"WDT_DIAG reset=%d attempts=%lu hold=%d",static_cast<int>(esp_reset_reason()),static_cast<unsigned long>(watchdogAttempts.load(std::memory_order_relaxed)),watchdogHold.load(std::memory_order_relaxed)?1:0);status(wd);
   }
   // A local counter update is informative only: it is NOT the server draft.
   // Rate-limit to protect the GPIO/NVS task; output may be dropped when full.
