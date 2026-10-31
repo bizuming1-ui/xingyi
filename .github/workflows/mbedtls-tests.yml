@@ -1,7 +1,7 @@
 name: TLS session tests
 on:
   pull_request:
-    paths: ['firmware/**', 'tests/mbedtls_session.cpp', 'tests/verified_connect.cpp', 'tests/mbedtls_http.cpp', 'tests/mbedtls_keepalive.cpp', 'tests/mbedtls_poll_interrupt.cpp', 'tests/time_proof_driver.cpp', 'tests/time_bootstrap.cpp', 'tests/firmware_https_database_driver.cpp', 'tests/database/firmware-https-integration.mjs', 'tests/database/time-proof.mjs', 'tests/database/package*.json', 'supabase/migrations/**', 'supabase/schema.sql', 'tests/run-mbedtls-tests.py', 'tests/mocks/lwip/**', '.github/workflows/mbedtls-tests.yml']
+    paths: ['firmware/**', 'tests/mbedtls_session.cpp', 'tests/verified_connect.cpp', 'tests/mbedtls_http.cpp', 'tests/mbedtls_keepalive.cpp', 'tests/mbedtls_poll_interrupt.cpp', 'tests/mbedtls_poll_presend.cpp', 'tests/time_proof_driver.cpp', 'tests/time_bootstrap.cpp', 'tests/firmware_https_database_driver.cpp', 'tests/database/firmware-https-integration.mjs', 'tests/database/time-proof.mjs', 'tests/database/package*.json', 'supabase/migrations/**', 'supabase/schema.sql', 'tests/run-mbedtls-tests.py', 'tests/mocks/lwip/**', '.github/workflows/mbedtls-tests.yml']
 permissions:
   contents: read
 jobs:

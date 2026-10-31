@@ -79,6 +79,17 @@ class HttpRpcExchange final : public RpcExchange {
     }
     connectMs_=static_cast<int>(channel_.nowMillis()-start);
     if(!remaining(start)) { result.status=Status::Timeout; return result; }
+    // A count may arrive while DNS/TCP/TLS setup is in progress. No poll
+    // bytes have been sent yet, so the verified connection can be handed to
+    // the next command without waiting for a response or re-handshaking.
+    // The planner still receives a failed poll and must preserve its normal
+    // status/binding/barrier fairness; no server result is fabricated.
+    if(isPoll && pollYield_ && pollYield_->interrupted()) {
+      pollYield_->yielded();lastPollYielded_=true;result.status=Status::Interrupted;
+      closer.keep=keepAlive_ && channel_.canReuse();
+      if(closer.keep)lastUsed_=channel_.nowMillis();
+      return result;
+    }
     stage_=Stage::Send;
     int failure=writeAll(headers,static_cast<size_t>(n),start);
     if(!failure) failure=writeAll(json,jsonLength,start);

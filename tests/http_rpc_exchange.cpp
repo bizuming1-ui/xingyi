@@ -7,10 +7,10 @@
 struct FakeTls : VerifiedTlsChannel {
   std::string sent, incoming; size_t cursor=0;uint32_t time=0; int closes=0, connects=0, calls=0; int maxWrite=11,maxRead=7;bool failConnect=false,timeoutRead=false, late=false,allowReuse=false,failWrite=false;uint32_t readDelay=0;
   uint32_t nowMillis() override {return time;}
-  Connect connectVerified(const char* host,uint16_t port,uint32_t timeout) override {++connects;assert(strcmp(host,"project123.supabase.co")==0 && port==443 && timeout>0);return failConnect?Connect::Error:Connect::Ok;}
+  Connect connectVerified(const char* host,uint16_t port,uint32_t timeout) override {++connects;if(countOnConnect){countOnConnect->accepted();countOnConnect=nullptr;}assert(strcmp(host,"project123.supabase.co")==0 && port==443 && timeout>0);return failConnect?Connect::Error:Connect::Ok;}
   int write(const char* data,size_t length,uint32_t timeout) override {assert(timeout);++calls;if(failWrite)return -1;size_t n=length<static_cast<size_t>(maxWrite)?length:static_cast<size_t>(maxWrite);sent.append(data,n);++time;return static_cast<int>(n);}
   int read(char* out,size_t cap,uint32_t timeout) override {assert(timeout);++calls;if(timeoutRead)return -2;if(late)time+=timeout;else {time+=readDelay+1;readDelay=0;}if(cursor==incoming.size())return 0;size_t n=incoming.size()-cursor;if(n>cap)n=cap;if(n>static_cast<size_t>(maxRead))n=maxRead;memcpy(out,incoming.data()+cursor,n);cursor+=n;return static_cast<int>(n);}
-  PollYieldPolicy* simulateCount=nullptr;int interruptedReads=0;bool simulateStall=false;
+  PollYieldPolicy* simulateCount=nullptr;int interruptedReads=0;bool simulateStall=false;PollYieldPolicy* countOnConnect=nullptr;
   int readInterruptible(char* out,size_t cap,uint32_t timeout,const ReadInterrupt* interrupt) override {
     if(simulateCount){simulateCount->accepted();simulateCount=nullptr;}
     if(interrupt && interrupt->interrupted()){++interruptedReads;return -3;}
@@ -116,6 +116,24 @@ int main(){
   preempt.incoming="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\n\r\n"+body;preempt.cursor=0;preempt.simulateCount=&priority;
   assert(RpcWorker::execute(prioritized,cmd,secret,reply).result==RpcWorker::Result::Ok);
   assert(!prioritized.lastPollYielded() && preempt.interruptedReads==1);
+  // A count arrives during a fresh TLS handshake. The status request has not
+  // written any bytes, so return it as interrupted while retaining the newly
+  // verified connection for the following upload. No duplicate poll is sent.
+  FakeTls duringConnect;duringConnect.allowReuse=true;duringConnect.maxRead=256;
+  PollYieldPolicy connectedPriority;connectedPriority.validPoll();duringConnect.countOnConnect=&connectedPriority;
+  HttpRpcExchange preserved(duringConnect,"project123.supabase.co",key,5000,5000,true,&connectedPriority);
+  assert(preserved.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Interrupted);
+  assert(preserved.lastPollYielded() && preserved.lastStage()==HttpRpcExchange::Stage::Connect);
+  assert(duringConnect.sent.empty() && duringConnect.closes==0 && duringConnect.connects==1);
+  duringConnect.incoming="HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+  assert(preserved.post("device_ingest","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  assert(duringConnect.connects==1 && preserved.lastReused());
+  assert(duringConnect.sent.find("/device_ingest ")!=std::string::npos && duringConnect.sent.find("/device_status ")==std::string::npos);
+  // If reuse is disabled, the skipped poll still closes its connection.
+  FakeTls noReuse;PollYieldPolicy noReusePriority;noReusePriority.validPoll();noReuse.countOnConnect=&noReusePriority;
+  HttpRpcExchange closed(noReuse,"project123.supabase.co",key,5000,5000,false,&noReusePriority);
+  assert(closed.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Interrupted);
+  assert(noReuse.closes==1 && noReuse.sent.empty());
   // Uploads, renewals and all other requests do not use the interruptible read.
   preempt.incoming="HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";preempt.cursor=0;preempt.simulateCount=&priority;
   assert(prioritized.post("device_ingest","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);

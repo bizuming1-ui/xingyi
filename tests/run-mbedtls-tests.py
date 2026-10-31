@@ -49,6 +49,10 @@ with tempfile.TemporaryDirectory() as tmp:
         '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-poll-interrupt'))
     run('g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread',
         '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'), '-I', arduino,
+        str(root / 'tests/mbedtls_poll_presend.cpp'), '-L', str(mbed / 'library'),
+        '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-poll-presend'))
+    run('g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread',
+        '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'), '-I', arduino,
         str(root / 'tests/time_bootstrap.cpp'), '-L', str(mbed / 'library'),
         '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-bootstrap'))
     for name in ('ca', 'wrong'):
@@ -238,6 +242,36 @@ with tempfile.TemporaryDirectory() as tmp:
         subprocess.run([str(p/'test-poll-interrupt'),str(interrupt_port),str(p/'ca.crt')],check=True,timeout=15)
         thread.join(timeout=5);assert not interrupt_errors,interrupt_errors
         assert len(interrupt_requests)==1
+    finally:listener.close()
+
+    # Slow TLS handshake: count is accepted before the poll writes any bytes.
+    # The single TLS connection must receive only the subsequent upload.
+    listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen();listener.settimeout(10)
+    presend_port=listener.getsockname()[1];presend_errors=[];presend_requests=[]
+    def presend_server():
+        try:
+            raw,_=listener.accept();raw.settimeout(5);time.sleep(.8)
+            with context.wrap_socket(raw,server_side=True) as conn:
+                data=b''
+                while b'\r\n\r\n' not in data:
+                    part=conn.recv(4096)
+                    if not part:raise RuntimeError('missing request')
+                    data+=part
+                head,_,body=data.partition(b'\r\n\r\n')
+                count=int(next(line.split(b':',1)[1] for line in head.split(b'\r\n') if line.lower().startswith(b'content-length:')))
+                while len(body)<count:
+                    part=conn.recv(4096)
+                    if not part:raise RuntimeError('incomplete body')
+                    body+=part
+                assert body[:count]==b'{}'
+                presend_requests.append(head)
+                conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}')
+        except Exception as e:presend_errors.append(str(e))
+    thread=threading.Thread(target=presend_server,daemon=True);thread.start()
+    try:
+        subprocess.run([str(p/'test-poll-presend'),str(presend_port),str(p/'ca.crt')],check=True,timeout=15)
+        thread.join(timeout=5);assert not presend_errors,presend_errors
+        assert len(presend_requests)==1 and presend_requests[0].startswith(b'POST /rest/v1/rpc/device_ingest ')
     finally:listener.close()
 
     # Expired test leaf: date exception applies only to this restricted endpoint;
