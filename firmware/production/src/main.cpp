@@ -28,6 +28,7 @@
 #include "FreeRtosRadioLifecycleLock.h"
 #include "AuthenticatedNetworkTime.h"
 #include "MonitorEvent.h"
+#include "MonitorThrottle.h"
 #include "BestEffortSerial.h"
 #include "UsbSerialRecovery.h"
 #include "ProgressWatchdog.h"
@@ -104,6 +105,7 @@ class SerialRpcMonitor final : public RpcObserver {
       event_.net=static_cast<int>(exchange_.lastStatus());event_.reused=exchange_.lastReused()?1:0;
       event_.connectMs=exchange_.connectMillis();event_.sentMs=exchange_.sentMillis();event_.firstMs=exchange_.firstByteMillis();event_.rxBytes=exchange_.receivedBytes();
     } else {event_.net=-1;}
+    if(!throttle_.emit(event_.kind==static_cast<int>(SyncPlanner::Kind::Poll),attempted,event_.endMs))return;
     // Normal status polls are omitted; failures and all upload/barrier
     // transactions are recorded. Gaps in ticket numbers are expected.
     if(event_.kind==static_cast<int>(SyncPlanner::Kind::Poll) && event_.result==0)return;
@@ -120,20 +122,20 @@ class SerialRpcMonitor final : public RpcObserver {
   uint32_t lost() const {return lost_.load(std::memory_order_relaxed);}
  private:
   static constexpr unsigned CAPACITY=16;
-  HttpRpcExchange& exchange_;StaticQueue_t control_{};uint8_t storage_[CAPACITY*sizeof(MonitorEvent)]{};QueueHandle_t queue_=nullptr;
+  HttpRpcExchange& exchange_;MonitorThrottle throttle_;StaticQueue_t control_{};uint8_t storage_[CAPACITY*sizeof(MonitorEvent)]{};QueueHandle_t queue_=nullptr;
   MonitorEvent event_{},display_{};uint32_t started_=0;std::atomic<uint32_t> lost_{0};bool active_=false;unsigned part_=0;
 };
 SerialRpcMonitor* rpcMonitor=nullptr;
 bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
-uint32_t lastStatus=0,lastDiagnostic=0,lastTlsIo=0,lastRpcDiag=0,lastFreezeDiag=0,lastBarrierRpcDiag=0,lastCountLine=0;
-uint64_t lastCountTotal=0;
+uint32_t lastStatus=0,lastDiagnostic=0,lastTlsIo=0,lastRpcDiag=0,lastFreezeDiag=0,lastBarrierRpcDiag=0;
+CountLineThrottle countLine;
 
 // Console output is best-effort and never waits for an attached terminal. No
 // secret, SSID, device ID, production-order UUID or request body is printed.
-void status(const char* message) {
-  (void)bestEffortLine(Serial,message);
+bool status(const char* message) {
+  return bestEffortLine(Serial,message);
 }
 bool validCa(const char* pem) {
   mbedtls_x509_crt cert;mbedtls_x509_crt_init(&cert);
@@ -268,7 +270,7 @@ void setup() {
   if(xTaskCreatePinnedToCore(networkTask,"xingyi-net",NETWORK_STACK_BYTES,nullptr,1,&handle,0)!=pdPASS || !handle) {
     startupFault="FAULT: network task unavailable";status(startupFault);return;
   }
-  initialized=true;lastCountTotal=counter.state().total;
+  initialized=true;countLine.begin(counter.state().total);
   countProgress.store(millis(),std::memory_order_relaxed);
   networkProgress.store(millis(),std::memory_order_relaxed);
   watchdogEnabled.store(true,std::memory_order_release);
@@ -337,9 +339,9 @@ void loop() {
   }
   // A local counter update is informative only: it is NOT the server draft.
   // Rate-limit to protect the GPIO/NVS task; output may be dropped when full.
-  if(!controller->faulted() && counter.isReady() && counter.state().total!=lastCountTotal && now-lastCountLine>=200) {
+  if(!controller->faulted() && counter.isReady() && countLine.due(counter.state().total,now)) {
     char info[64];snprintf(info,sizeof(info),"COUNT t=%lu total=%llu p=%llu",static_cast<unsigned long>(now),static_cast<unsigned long long>(counter.state().total),static_cast<unsigned long long>(counter.pending()));
-    status(info);lastCountLine=now;lastCountTotal=counter.state().total;
+    const bool written=status(info);countLine.attempted(counter.state().total,now,written);
   }
   // Emit only numeric failure stage/result/detail, never credentials or data.
   // Offset from the main status line so a small serial buffer can drain.
