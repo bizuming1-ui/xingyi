@@ -7,10 +7,11 @@
 // The endpoint is a constant RPC name, never a URL containing credentials.
 class RpcExchange {
  public:
-  enum class Status { Ok, NetworkError, Timeout, ResponseTooLarge };
+  enum class Status { Ok, NetworkError, Timeout, ResponseTooLarge, Interrupted };
   struct Response { Status status=Status::NetworkError; int httpStatus=0; size_t length=0; };
   virtual ~RpcExchange() = default;
   virtual void close() {}
+  virtual void validPoll() {}
   virtual Response post(const char* endpoint,const char* json,size_t jsonLength,char* response,size_t responseCapacity)=0;
 };
 
@@ -34,6 +35,7 @@ class RpcWorker {
     if (result.status!=RpcExchange::Status::Ok || result.length>RpcCodec::MAX_RESPONSE_BYTES) return {Result::TransportError,result.httpStatus};
     if (result.httpStatus<200 || result.httpStatus>=300) {transport.close();return {Result::HttpError,result.httpStatus};}
     if (RpcCodec::decode(command,response.data,result.length,reply)!=RpcCodec::Result::Ok) {transport.close();return {Result::InvalidResponse,result.httpStatus};}
+    if(command.kind==SyncPlanner::Kind::Poll)transport.validPoll();
     return {Result::Ok,result.httpStatus};
   }
  private:

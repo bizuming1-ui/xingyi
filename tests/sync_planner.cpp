@@ -31,6 +31,16 @@ SyncPlanner::Reply status(const char* order,const char* binding,uint64_t revisio
 SyncPlanner::Reply accepted(uint64_t total) {SyncPlanner::Reply r{};r.success=true;r.acceptedTotal=total;return r;}
 SyncPlanner::Reply frozen(B state){SyncPlanner::Reply r{};r.success=true;r.barrierState=state;if(state==B::Ready)copy(r.nonce,nonce);return r;}
 int main(){
+ // A locally interrupted poll is a failed reply, not an acknowledgement.
+ // New counts remain on the original binding and get an upload opportunity.
+ Store yieldingStore;DurableCounter yieldingCounter(yieldingStore);assert(yieldingCounter.load()==R::Ok);
+ Epochs yieldingEpoch;SyncPlanner yielding(yieldingCounter,yieldingEpoch,true);
+ auto yc=yielding.next(0);assert(yc.kind==K::Poll);assert(yielding.complete(yc.ticket,status(order1,binding1,1),10));
+ yc=yielding.next(200);assert(yc.kind==K::Upload);assert(yielding.complete(yc.ticket,accepted(0),210));
+ yc=yielding.next(600);assert(yc.kind==K::Poll);assert(yielding.count(1)==R::Ok);
+ SyncPlanner::Reply interrupted{};assert(yielding.complete(yc.ticket,interrupted,650));
+ yc=yielding.next(800);assert(yc.kind==K::Upload && yc.total==1 && strcmp(yc.binding,binding1)==0);
+ assert(yielding.complete(yc.ticket,accepted(1),810) && yieldingCounter.pending()==0);
  // A successful slow status response must be acted on even when it took
  // longer than the poll interval; previously each result triggered a new poll.
  Store slowStore;DurableCounter slowCounter(slowStore);assert(slowCounter.load()==R::Ok);

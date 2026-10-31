@@ -80,6 +80,7 @@ WatchdogResetMarker watchdogResetMarker(watchdogResetRecord);
 bool previousWatchdogAttempt=false;
 std::atomic<bool> radioOnline{false},timeTrusted{false};
 std::atomic<int> wifiPsDisabled{-1},wifiPsSet{-2};
+PollYieldPolicy pollYield;
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0},timeBudget{0};
 std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0},rpcReuse{0};
@@ -248,7 +249,7 @@ void setup() {
   static MbedTlsSession tls(tcp);static VerifiedConnect verified(clock,tcp,resolved,tls);
   static TrustedTimeWindow window(monotonic,config.timeLifetimeMs,config.clockDriftPpm);
   static MbedTlsChannel channel(clock,scheduler,window,verified,tls,config.ca);
-  static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS,DATA_RPC_TIMEOUT_MS,true);
+  static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS,DATA_RPC_TIMEOUT_MS,true,&pollYield);
   static SerialRpcMonitor monitor(exchange);rpcMonitor=&monitor;
   static SyncNetworkWorker worker(mailbox,exchange,config.secret,&monitor);
   static TimeProof proof(networkEntropy);static TimeBootstrapExchange bootstrap(clock,scheduler,tcp,resolved,proof);
@@ -293,6 +294,7 @@ void loop() {
   if(!initialized){const uint32_t now=millis();if(now-lastStatus>=5000){lastStatus=now;status(startupFault);}delay(100);return;}
   const uint32_t now=millis();
   const auto sample=input->tick(digitalRead(BUTTON_PIN)==LOW,now);
+  if(sample.accepted)pollYield.accepted();
   controller->step(now);
   if(controller->faulted() || sample.status==DeviceInput::Status::StorageError || sample.status==DeviceInput::Status::CapacityFull || sample.status==DeviceInput::Status::Fault)
     stopNetwork.store(true,std::memory_order_release);

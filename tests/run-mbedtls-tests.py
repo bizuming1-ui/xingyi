@@ -45,6 +45,10 @@ with tempfile.TemporaryDirectory() as tmp:
         '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-keepalive'))
     run('g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread',
         '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'), '-I', arduino,
+        str(root / 'tests/mbedtls_poll_interrupt.cpp'), '-L', str(mbed / 'library'),
+        '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-poll-interrupt'))
+    run('g++', '-std=c++17', '-Wall', '-Wextra', '-Werror', '-pthread',
+        '-I', str(root / 'tests/mocks'), '-I', str(mbed / 'include'), '-I', arduino,
         str(root / 'tests/time_bootstrap.cpp'), '-L', str(mbed / 'library'),
         '-lmbedtls', '-lmbedx509', '-lmbedcrypto', '-o', str(p / 'test-bootstrap'))
     for name in ('ca', 'wrong'):
@@ -210,6 +214,30 @@ with tempfile.TemporaryDirectory() as tmp:
         subprocess.run([str(p/'test-keepalive'),str(keep_port),str(p/'ca.crt')],check=True,timeout=20)
         thread.join(timeout=6);assert not server_errors,server_errors
         assert len(received_requests)==2
+    finally:listener.close()
+
+    # A real verified TLS peer accepts the status request but stalls. A
+    # simulated locally accepted count interrupts only the receive and closes
+    # the connection without treating the unknown response as success.
+    listener=socket.socket();listener.bind(('127.0.0.1',0));listener.listen();listener.settimeout(10)
+    interrupt_port=listener.getsockname()[1];interrupt_errors=[];interrupt_requests=[]
+    def interrupt_server():
+        try:
+            raw,_=listener.accept();raw.settimeout(5)
+            with context.wrap_socket(raw,server_side=True) as conn:
+                data=b''
+                while b'\r\n\r\n' not in data:
+                    part=conn.recv(4096)
+                    if not part:raise RuntimeError('missing request')
+                    data+=part
+                interrupt_requests.append(1)
+                time.sleep(1)
+        except Exception as e:interrupt_errors.append(str(e))
+    thread=threading.Thread(target=interrupt_server,daemon=True);thread.start()
+    try:
+        subprocess.run([str(p/'test-poll-interrupt'),str(interrupt_port),str(p/'ca.crt')],check=True,timeout=15)
+        thread.join(timeout=5);assert not interrupt_errors,interrupt_errors
+        assert len(interrupt_requests)==1
     finally:listener.close()
 
     # Expired test leaf: date exception applies only to this restricted endpoint;

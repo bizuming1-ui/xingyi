@@ -10,6 +10,12 @@ struct FakeTls : VerifiedTlsChannel {
   Connect connectVerified(const char* host,uint16_t port,uint32_t timeout) override {++connects;assert(strcmp(host,"project123.supabase.co")==0 && port==443 && timeout>0);return failConnect?Connect::Error:Connect::Ok;}
   int write(const char* data,size_t length,uint32_t timeout) override {assert(timeout);++calls;if(failWrite)return -1;size_t n=length<static_cast<size_t>(maxWrite)?length:static_cast<size_t>(maxWrite);sent.append(data,n);++time;return static_cast<int>(n);}
   int read(char* out,size_t cap,uint32_t timeout) override {assert(timeout);++calls;if(timeoutRead)return -2;if(late)time+=timeout;else {time+=readDelay+1;readDelay=0;}if(cursor==incoming.size())return 0;size_t n=incoming.size()-cursor;if(n>cap)n=cap;if(n>static_cast<size_t>(maxRead))n=maxRead;memcpy(out,incoming.data()+cursor,n);cursor+=n;return static_cast<int>(n);}
+  PollYieldPolicy* simulateCount=nullptr;int interruptedReads=0;
+  int readInterruptible(char* out,size_t cap,uint32_t timeout,const ReadInterrupt* interrupt) override {
+    if(simulateCount){simulateCount->accepted();simulateCount=nullptr;}
+    if(interrupt && interrupt->interrupted()){++interruptedReads;return -3;}
+    return read(out,cap,timeout);
+  }
   void close() override {++closes;}
   bool canReuse() override {return allowReuse;}
 };
@@ -88,5 +94,24 @@ int main(){
   assert(aged.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
   expired.time+=5000;assert(aged.post("device_status","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
   assert(expired.connects==2 && expired.closes==1);
+  // One valid, fully decoded poll opens the gate. A count accepted while a
+  // subsequent status read is in flight may cancel ONLY that read; the failed
+  // poll cannot acknowledge counts or keep its socket. The next status read
+  // is not cancellable until another decoded success, preventing starvation.
+  PollYieldPolicy priority;FakeTls preempt;preempt.allowReuse=true;preempt.maxRead=256;
+  preempt.incoming="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\n\r\n"+body;
+  HttpRpcExchange prioritized(preempt,"project123.supabase.co",key,5000,5000,true,&priority);
+  assert(RpcWorker::execute(prioritized,cmd,secret,reply).result==RpcWorker::Result::Ok);
+  preempt.simulateCount=&priority;
+  assert(RpcWorker::execute(prioritized,cmd,secret,reply).result==RpcWorker::Result::TransportError);
+  assert(prioritized.lastPollYielded() && preempt.interruptedReads==1 && preempt.closes==1 && !reply.success);
+  preempt.incoming="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\n\r\n"+body;preempt.cursor=0;
+  preempt.simulateCount=&priority;
+  assert(RpcWorker::execute(prioritized,cmd,secret,reply).result==RpcWorker::Result::Ok);
+  assert(!prioritized.lastPollYielded() && preempt.interruptedReads==1);
+  // Uploads, renewals and all other requests do not use the interruptible read.
+  preempt.incoming="HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";preempt.cursor=0;preempt.simulateCount=&priority;
+  assert(prioritized.post("device_ingest","{}",2,output,sizeof(output)).status==RpcExchange::Status::Ok);
+  assert(preempt.simulateCount==&priority && preempt.interruptedReads==1);
   std::cout<<"HTTP RPC exchange tests passed\n";
 }

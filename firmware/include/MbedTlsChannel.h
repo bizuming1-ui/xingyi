@@ -52,10 +52,12 @@ class MbedTlsChannel final : public VerifiedTlsChannel {
       scheduler_.yield();
     }
   }
-  int read(char* data,size_t capacity,uint32_t timeoutMs) override {
+  int read(char* data,size_t capacity,uint32_t timeoutMs) override {return readInterruptible(data,capacity,timeoutMs,nullptr);}
+  int readInterruptible(char* data,size_t capacity,uint32_t timeoutMs,const ReadInterrupt* interrupt) override {
     if(!data || !capacity || capacity>16384 || !timeoutMs || timeoutMs>30000)return -1;
     const uint32_t start=clock_.nowMillis();
     for(;;) {
+      if(interrupt && interrupt->interrupted()){close();return -3;}
       if(elapsed(start,timeoutMs)){close();return -2;}
       if(!canReuse()){close();return -1;}
       const auto r=tls_.read(reinterpret_cast<uint8_t*>(data),capacity);
