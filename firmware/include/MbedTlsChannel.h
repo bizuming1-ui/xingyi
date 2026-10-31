@@ -21,7 +21,10 @@ class MbedTlsChannel final : public VerifiedTlsChannel {
                  VerifiedConnect& connection,MbedTlsSession& tls,const char* ca)
    :clock_(clock),scheduler_(scheduler),time_(time),connection_(connection),tls_(tls),ca_(ca) {}
   uint32_t nowMillis() override {return clock_.nowMillis();}
+  int dnsDoneMillis() const override {return connection_.dnsDoneMillis();}
+  int tcpDoneMillis() const override {return connection_.tcpDoneMillis();}
   Connect connectVerified(const char* host,uint16_t port,uint32_t timeoutMs) override {
+    connection_.clearDiagnostics();
     if(!timeoutMs || timeoutMs>30000 || !timeValid())return Connect::Error;
     const uint32_t start=clock_.nowMillis();
     if(!connection_.beginBounded(host,port,ca_,time_,timeoutMs))

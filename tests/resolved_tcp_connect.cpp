@@ -23,7 +23,7 @@ int main(){
  assert(!c.begin("evil.example",443,0,100));assert(!c.begin("abc.supabase.co",0,0,100));
  assert(c.begin("abc.supabase.co",443,UINT32_MAX-49,100));
  assert(!strcmp(c.hostname(),"abc.supabase.co") && c.poll(20)==S::Resolving);
- backend.finish(0);assert(c.poll(29)==S::Connecting); // 79 ms elapsed; TCP gets only remaining time
+ backend.finish(0);assert(c.poll(29)==S::Connecting);assert(c.dnsDoneMillis()==79 && c.tcpDoneMillis()==-1); // 79 ms elapsed; TCP gets only remaining time
  assert(ops.address[0]==1 && ops.address[3]==4 && ops.port==443);
  assert(c.poll(49)==S::Connecting && c.poll(50)==S::Timeout && ops.closed==1);
  c.close();assert(!*c.hostname());
@@ -33,7 +33,7 @@ int main(){
  assert(c.poll(21)==S::Failed && ops.opened==1);c.close();
  assert(c.begin("abc.supabase.co",443,30,100));backend.finish(3);
  assert(c.poll(31)==S::Connecting);ops.status=TcpOps::Connect::Ready;
- assert(c.poll(32)==S::Connected);assert(c.poll(999)==S::Connected);c.close();assert(ops.closed==2);
+ assert(c.poll(32)==S::Connected);assert(c.dnsDoneMillis()==1 && c.tcpDoneMillis()==2);assert(c.poll(999)==S::Connected);c.close();assert(ops.closed==2);
  ops.next=TcpOps::Connect::Error;assert(c.begin("abc.supabase.co",443,0,100));backend.finish(4);
  assert(c.poll(1)==S::Failed && ops.closed==3);c.close();
  // Destruction/close abandons DNS rather than freeing a slot still owned by callback.

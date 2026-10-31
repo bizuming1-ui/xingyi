@@ -27,6 +27,9 @@ class VerifiedConnect {
   VerifiedConnect& operator=(const VerifiedConnect&)=delete;
   // Verified means setup succeeded; later I/O must still check TLS status.
   State state() const {return state_;}
+  void clearDiagnostics() {resolved_.clearDiagnostics();}
+  int dnsDoneMillis() const {return resolved_.dnsDoneMillis();}
+  int tcpDoneMillis() const {return resolved_.tcpDoneMillis();}
   bool begin(const char* host,uint16_t port,const char* ca,bool trustedTime,uint32_t timeoutMs) {
     return beginInternal(host,port,ca,trustedTime,nullptr,timeoutMs);
   }

@@ -16,6 +16,10 @@ class ResolvedTcpConnect {
   ResolvedTcpConnect(const ResolvedTcpConnect&)=delete;
   ResolvedTcpConnect& operator=(const ResolvedTcpConnect&)=delete;
   State state() const {return state_;}
+  // Elapsed offsets from begin(), retained after close for diagnostics only.
+  void clearDiagnostics() {dnsDone_=tcpDone_=-1;}
+  int dnsDoneMillis() const {return dnsDone_;}
+  int tcpDoneMillis() const {return tcpDone_;}
   bool usesTransport(const NonblockingTcp& tcp) const {return &tcp_==&tcp;}
   // Original hostname, not the resolved address; future TLS must authenticate it.
   const char* hostname() const {return hostname_;}
@@ -25,7 +29,7 @@ class ResolvedTcpConnect {
     if(!dns_.begin(host,handle))return false;
     // dns.begin has already validated the string and its bounded length.
     memcpy(hostname_,host,strlen(host)+1);
-    handle_=handle;pending_=true;port_=port;started_=now;timeout_=timeoutMs;state_=State::Resolving;
+    handle_=handle;pending_=true;port_=port;started_=now;timeout_=timeoutMs;dnsDone_=tcpDone_=-1;state_=State::Resolving;
     return true;
   }
   State poll(uint32_t now) {
@@ -39,12 +43,14 @@ class ResolvedTcpConnect {
       // Success and Failed consume their slot; Invalid cannot safely be used.
       pending_=false;
       if(result!=AsyncDns::Result::Success){tcp_.close();state_=State::Failed;return state_;}
+      dnsDone_=static_cast<int>(elapsed);
       if(!tcp_.start(address,port_,now,timeout_-elapsed)){tcp_.close();state_=State::Failed;return state_;}
       state_=tcp_.state()==NonblockingTcp::State::Connected?State::Connected:State::Connecting;
+      if(state_==State::Connected)tcpDone_=static_cast<int>(elapsed);
       return state_;
     }
     const auto result=tcp_.poll(now);
-    if(result==NonblockingTcp::State::Connected)state_=State::Connected;
+    if(result==NonblockingTcp::State::Connected){state_=State::Connected;tcpDone_=static_cast<int>(elapsed);}
     else if(result==NonblockingTcp::State::Timeout){tcp_.close();state_=State::Timeout;}
     else if(result!=NonblockingTcp::State::Connecting){tcp_.close();state_=State::Failed;}
     return state_;
@@ -53,6 +59,6 @@ class ResolvedTcpConnect {
  private:
   AsyncDns& dns_;NonblockingTcp& tcp_;AsyncDns::Handle handle_{};
   char hostname_[80]{};uint16_t port_=0;uint32_t started_=0,timeout_=0;
-  bool pending_=false;State state_=State::Idle;
+  bool pending_=false;State state_=State::Idle;int dnsDone_=-1,tcpDone_=-1;
   void stopPending(){if(pending_){dns_.expire(handle_);pending_=false;}}
 };

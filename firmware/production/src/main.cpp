@@ -1,3 +1,4 @@
+#include "NetworkObservations.h"
 // Candidate integration firmware: do not deploy to production until the real
 // service, timing, NVS, freeze and hardware behavior have been validated.
 #include <Arduino.h>
@@ -104,12 +105,23 @@ class SerialRpcMonitor final : public RpcObserver {
       event_.http=exchange_.lastHttpStatus();event_.stage=static_cast<int>(exchange_.lastStage());
       event_.net=static_cast<int>(exchange_.lastStatus());event_.reused=exchange_.lastReused()?1:0;
       event_.connectMs=exchange_.connectMillis();event_.sentMs=exchange_.sentMillis();event_.firstMs=exchange_.firstByteMillis();event_.rxBytes=exchange_.receivedBytes();
+      if(event_.connectMs>=0 && !event_.reused){event_.dnsMs=exchange_.dnsDoneMillis();event_.tcpMs=exchange_.tcpDoneMillis();}
     } else {event_.net=-1;}
+    observations_.record(attempted,outcome.result!=RpcWorker::Result::InvalidRequest,
+      outcome.result==RpcWorker::Result::Ok,attempted && exchange_.lastStatus()==RpcExchange::Status::Timeout,
+      attempted && exchange_.lastStatus()==RpcExchange::Status::Interrupted,event_.endMs);
     if(!throttle_.emit(event_.kind==static_cast<int>(SyncPlanner::Kind::Poll),attempted,event_.endMs))return;
     // Normal status polls are omitted; failures and all upload/barrier
     // transactions are recorded. Gaps in ticket numbers are expected.
     if(event_.kind==static_cast<int>(SyncPlanner::Kind::Poll) && event_.result==0)return;
     if(!queue_ || xQueueSend(queue_,&event_,0)!=pdTRUE)lost_.fetch_add(1,std::memory_order_relaxed);
+  }
+  // Called only by the network thread after one actual time attempt completes.
+  void timeAttempt(uint32_t seq,uint32_t started,uint32_t ended,bool preserving,const AuthenticatedNetworkTime& t) {
+    MonitorEvent e{};e.ticket=seq;e.endMs=ended;e.durationMs=ended-started;e.kind=0;e.barrier=preserving?1:0;
+    e.result=t.lastResult();e.stage=t.lastStage();e.net=t.lastDetail();e.http=static_cast<int>(t.lastBudget());
+    e.connectMs=static_cast<int>(t.lastHandshakeStartMs());e.sentMs=static_cast<int>(t.lastTxBytes());e.firstMs=static_cast<int>(t.lastRxBytes());
+    if(!queue_ || xQueueSend(queue_,&e,0)!=pdTRUE)lost_.fetch_add(1,std::memory_order_relaxed);
   }
   // Called by counting thread only; never blocks if serial is not draining.
   void drain() {
@@ -117,12 +129,13 @@ class SerialRpcMonitor final : public RpcObserver {
     char line[80];const int n=formatMonitorEvent(display_,part_,line,sizeof(line));
     if(n<=0 || static_cast<size_t>(n)>=sizeof(line)) {lost_.fetch_add(1,std::memory_order_relaxed);active_=false;return;}
     if(!bestEffortLine(Serial,line))return;
-    if(++part_==4)active_=false;
+    if(++part_==(display_.kind==0?2u:5u))active_=false;
   }
   uint32_t lost() const {return lost_.load(std::memory_order_relaxed);}
+  NetworkObservations::Snapshot observations() const {return observations_.snapshot();}
  private:
   static constexpr unsigned CAPACITY=16;
-  HttpRpcExchange& exchange_;MonitorThrottle throttle_;StaticQueue_t control_{};uint8_t storage_[CAPACITY*sizeof(MonitorEvent)]{};QueueHandle_t queue_=nullptr;
+  HttpRpcExchange& exchange_;MonitorThrottle throttle_;NetworkObservations observations_;StaticQueue_t control_{};uint8_t storage_[CAPACITY*sizeof(MonitorEvent)]{};QueueHandle_t queue_=nullptr;
   MonitorEvent event_{},display_{};uint32_t started_=0;std::atomic<uint32_t> lost_{0};bool active_=false;unsigned part_=0;
 };
 SerialRpcMonitor* rpcMonitor=nullptr;
@@ -143,9 +156,15 @@ bool validCa(const char* pem) {
   mbedtls_x509_crt_free(&cert);return result==0;
 }
 void networkTask(void*) {
+  uint32_t seenTimeAttempt=0;
   while(!stopNetwork.load(std::memory_order_acquire)) {
     networkProgress.store(millis(),std::memory_order_relaxed);
     network->step();
+    const uint32_t timeSeq=network->timeAttemptSequence();
+    if(timeSeq!=seenTimeAttempt) {
+      seenTimeAttempt=timeSeq;
+      rpcMonitor->timeAttempt(timeSeq,network->timeAttemptStart(),network->timeAttemptEnd(),network->timeAttemptPreserving(),*networkTime);
+    }
     wifiPsDisabled.store(networkStation->powerSaveDiagnostic(),std::memory_order_relaxed);
     wifiPsSet.store(networkStation->powerSaveSetResult(),std::memory_order_relaxed);
     networkProgress.store(millis(),std::memory_order_relaxed);
@@ -324,6 +343,14 @@ void loop() {
   if(now-lastMonitorNotice>=15000) {
     char info[64];snprintf(info,sizeof(info),"MON v=1 t=%lu lost=%lu",static_cast<unsigned long>(now),static_cast<unsigned long>(rpcMonitor->lost()));
     status(info);lastMonitorNotice=now;
+  }
+  static uint32_t lastNetSummary=0;
+  if(now-lastNetSummary>=15000 && now-lastStatus>=950 && now-lastStatus<1000) {
+    const auto obs=rpcMonitor->observations();const uint32_t snapNow=millis();char info[128];
+    snprintf(info,sizeof(info),"NET v=1 ok=%lu fail=%lu timeout=%lu yield=%lu age=%lld",
+      static_cast<unsigned long>(obs.ok),static_cast<unsigned long>(obs.fail),static_cast<unsigned long>(obs.timeout),
+      static_cast<unsigned long>(obs.yield),obs.everOk?static_cast<long long>(static_cast<uint32_t>(snapNow-obs.lastOk)):-1LL);
+    status(info);lastNetSummary=now;
   }
   // Separate from the status and MON lines so a small TX buffer can drain.
   // This is a best-effort snapshot, not proof of a reset cause.

@@ -14,6 +14,8 @@ class VerifiedTlsChannel {
   enum class Connect { Ok, Error, Timeout };
   virtual ~VerifiedTlsChannel()=default;
   virtual uint32_t nowMillis()=0;
+  virtual int dnsDoneMillis() const {return -1;}
+  virtual int tcpDoneMillis() const {return -1;}
   virtual Connect connectVerified(const char* host,uint16_t port,uint32_t timeoutMs)=0;
   virtual int write(const char* data,size_t length,uint32_t timeoutMs)=0;
   virtual int read(char* data,size_t capacity,uint32_t timeoutMs)=0;
@@ -42,6 +44,8 @@ class HttpRpcExchange final : public RpcExchange {
   int sentMillis() const {return sentMs_;}
   int firstByteMillis() const {return firstMs_;}
   unsigned receivedBytes() const {return receivedBytes_;}
+  int dnsDoneMillis() const {return lastReused_?-1:channel_.dnsDoneMillis();}
+  int tcpDoneMillis() const {return lastReused_?-1:channel_.tcpDoneMillis();}
   void validPoll() override {
     if(pollYield_)pollYield_->validPoll();
     // Only a fully decoded successful status response may train this hint.

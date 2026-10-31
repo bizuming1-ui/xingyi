@@ -85,14 +85,14 @@ int main(){
  GuardedWifiSupervisor wifi3(lock3,supervisor3);Clock clock3;Time time3;Mailbox mailbox3;Exchange exchange3;
  SyncNetworkWorker worker3(mailbox3,exchange3,"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
  NetworkTaskCoordinator proactive(clock3,wifi3,time3,worker3);time3.valid=true;time3.due=true;
- proactive.step();time3.valid=true;clock3.now=1;proactive.step();assert(time3.preserves==1 && time3.trusted());
+ proactive.step();time3.valid=true;clock3.now=1;proactive.step();assert(time3.preserves==1 && time3.trusted());assert(proactive.timeAttemptSequence()==1 && proactive.timeAttemptPreserving());
  clock3.now=4999;proactive.step();assert(time3.preserves==1);
  clock3.now=5001;proactive.step();assert(time3.preserves==2);
  SyncPlanner::Command freeze{};freeze.kind=SyncPlanner::Kind::Freeze;assert(mailbox3.submit(freeze));
  worker3.failUnavailable();assert(worker3.barrierActive());
  clock3.now=11000;proactive.step();assert(time3.preserves==2 && time3.trusted());
  // Loss of trust must bootstrap even when a barrier is being resolved.
- time3.valid=false;clock3.now=16000;proactive.step();assert(time3.refreshes==1);
+ time3.valid=false;clock3.now=16000;proactive.step();assert(time3.refreshes==1 && proactive.timeAttemptSequence()==3 && !proactive.timeAttemptPreserving());
  // Already queued upload gets one opportunity before proactive refresh,
  // but a continuous stream cannot indefinitely defer time proof.
  Lock lock4;Station station4;station4.online=true;WifiSupervisor supervisor4(station4,"network","password");

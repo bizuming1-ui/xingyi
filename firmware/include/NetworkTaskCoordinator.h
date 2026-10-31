@@ -32,6 +32,10 @@ class NetworkTaskCoordinator {
    :clock_(clock),wifi_(wifi),time_(time),worker_(worker){}
   NetworkTaskCoordinator(const NetworkTaskCoordinator&)=delete;
   NetworkTaskCoordinator& operator=(const NetworkTaskCoordinator&)=delete;
+  uint32_t timeAttemptSequence() const {return timeSeq_;}
+  uint32_t timeAttemptStart() const {return timeStart_;}
+  uint32_t timeAttemptEnd() const {return timeEnd_;}
+  bool timeAttemptPreserving() const {return timePreserving_;}
   void step() {
     const uint32_t now=clock_.nowMillis();
     if(!wifi_.step(now)){worker_.flushPending();return;}
@@ -41,7 +45,8 @@ class NetworkTaskCoordinator {
     if(!time_.trusted()) {
       deferred_=false;worker_.closeConnection(); // bootstrap shares the same TCP/TLS resources
       if(!attempted_ || static_cast<uint32_t>(now-lastAttempt_)>=TIME_RETRY_MS) {
-        (void)time_.refresh();
+        timeStart_=clock_.nowMillis();timePreserving_=false;
+        (void)time_.refresh();timeEnd_=clock_.nowMillis();++timeSeq_;
         // Backoff is measured from completion, including timeout duration.
         attempted_=true;lastAttempt_=clock_.nowMillis();
       }
@@ -57,7 +62,8 @@ class NetworkTaskCoordinator {
       if(!deferred_ && worker_.hasPriorityCommand()) {
         deferred_=true;worker_.step();return;
       }
-      deferred_=false;worker_.closeConnection();(void)time_.refreshPreserving();
+      deferred_=false;worker_.closeConnection();timeStart_=clock_.nowMillis();timePreserving_=true;
+      (void)time_.refreshPreserving();timeEnd_=clock_.nowMillis();++timeSeq_;
       attempted_=true;lastAttempt_=clock_.nowMillis();
       if(!time_.trusted()){worker_.failUnavailable();return;}
     }
@@ -66,4 +72,5 @@ class NetworkTaskCoordinator {
  private:
   NetworkTaskClock& clock_;GuardedWifiSupervisor& wifi_;NetworkTimeService& time_;SyncNetworkWorker& worker_;
   bool attempted_=false,deferred_=false;uint32_t lastAttempt_=0;
+  uint32_t timeSeq_=0,timeStart_=0,timeEnd_=0;bool timePreserving_=false;
 };
