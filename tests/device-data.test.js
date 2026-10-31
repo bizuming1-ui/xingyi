@@ -82,3 +82,22 @@ test('provisioning returns one-time credentials without retrying uncertain reque
  db.rpc=async()=>({data:null,error:null});await assert.rejects(()=>data.provision('fixture','测试'),/未创建设备/);
  db.rpc=async()=>({data:{id,secret:'not-a-secret'},error:null});await assert.rejects(()=>data.provision('fixture','测试'),/回复无效/);
 });
+
+test('realtime hints coalesce and re-read after an in-flight request without trusting events',async()=>{
+ const a=deferred(),b=deferred(),updates=[],timers=[];let calls=0;
+ const m=new DeviceMonitor({load(){return ++calls===1?a.promise:b.promise;}},{interval:250,setTimer:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimer:()=>{}});
+ m.start(order,e=>updates.push(e));m.refreshSoon();m.refreshSoon();assert.equal(calls,1);
+ a.resolve({orderId:order,draftCount:1});await flush();assert.equal(timers[0].ms,100);assert.equal(calls,1);
+ timers[0].fn();await flush();assert.equal(calls,2);
+ b.resolve({orderId:order,draftCount:2});await flush();assert.equal(updates[1].snapshot.draftCount,2);
+ m.refreshSoon();const kick=timers.at(-1);assert.equal(kick.ms,100);m.refreshSoon();assert.equal(timers.at(-1),kick);
+ m.stop();kick.fn();await flush();assert.equal(calls,2);
+});
+
+test('realtime hints do not defeat error backoff or execute cancelled timer callbacks',async()=>{
+ const timers=[];let calls=0;const pending=deferred();
+ const m=new DeviceMonitor({load(){calls++;return calls===1?Promise.resolve({orderId:order,draftCount:0}):pending.promise;}},{interval:250,setTimer:(fn,ms)=>{timers.push({fn,ms});return timers.length;},clearTimer:()=>{}});
+ m.start(order,()=>{});await flush();const stale=timers[0];m.refreshSoon();stale.fn();await flush();assert.equal(calls,1);
+ timers.at(-1).fn();assert.equal(calls,2);m.refreshSoon();pending.reject(Error('offline'));await flush();
+ assert.equal(timers.at(-1).ms,1000);const count=timers.length;m.refreshSoon();assert.equal(timers.length,count);m.stop();
+});

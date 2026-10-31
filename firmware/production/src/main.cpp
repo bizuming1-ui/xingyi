@@ -63,6 +63,7 @@ SyncPlanner* countPlanner=nullptr;
 DeviceInput* input=nullptr;
 NetworkTaskCoordinator* network=nullptr;
 GuardedWifiSupervisor* networkWifi=nullptr;
+EspWifiStation* networkStation=nullptr;
 AuthenticatedNetworkTime* networkTime=nullptr;
 SyncNetworkWorker* networkWorker=nullptr;
 HttpRpcExchange* networkExchange=nullptr;
@@ -78,6 +79,7 @@ RTC_NOINIT_ATTR WatchdogResetMarker::Record watchdogResetRecord;
 WatchdogResetMarker watchdogResetMarker(watchdogResetRecord);
 bool previousWatchdogAttempt=false;
 std::atomic<bool> radioOnline{false},timeTrusted{false};
+std::atomic<int> wifiPsDisabled{-1};
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0},timeBudget{0};
 std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0},rpcReuse{0};
@@ -140,6 +142,7 @@ void networkTask(void*) {
   while(!stopNetwork.load(std::memory_order_acquire)) {
     networkProgress.store(millis(),std::memory_order_relaxed);
     network->step();
+    wifiPsDisabled.store(networkStation->powerSaveDiagnostic(),std::memory_order_relaxed);
     networkProgress.store(millis(),std::memory_order_relaxed);
     // Updates are informational only; they cannot prove a live freeze lease.
     const bool online=networkWifi->state()==WifiSupervisor::State::Online;
@@ -251,7 +254,7 @@ void setup() {
   static TimeWindowSynchronizer sync(monotonic,window,bootstrap);
   static AuthenticatedNetworkTime time(window,sync,config.host,config.key,config.ca,config.deviceId,config.secret,TIME_BOOTSTRAP_TIMEOUT_MS,TIME_RECOVERY_TIMEOUT_MS);
   static NetworkTaskCoordinator coordinator(clock,wifi,time,worker);
-  controller=&countController;countPlanner=&planner;input=&button;network=&coordinator;networkWifi=&wifi;networkTime=&time;networkWorker=&worker;networkExchange=&exchange;
+  controller=&countController;countPlanner=&planner;input=&button;network=&coordinator;networkWifi=&wifi;networkStation=&station;networkTime=&time;networkWorker=&worker;networkExchange=&exchange;
   if(controller->faulted()) {startupFault="FAULT: initial state invalid";status(startupFault);return;}
   watchdogBudget.begin(esp_reset_reason()==ESP_RST_SW);
   TaskHandle_t guardHandle=nullptr;
@@ -322,6 +325,11 @@ void loop() {
   if(now-lastWatchdogDiag>=15000 && now-lastStatus>=300 && now-lastStatus<400) {
     char wd[96];snprintf(wd,sizeof(wd),"WDT_DIAG reset=%d attempts=%lu hold=%d prior=%d",static_cast<int>(esp_reset_reason()),static_cast<unsigned long>(watchdogAttempts.load(std::memory_order_relaxed)),watchdogHold.load(std::memory_order_relaxed)?1:0,previousWatchdogAttempt?1:0);
     status(wd);lastWatchdogDiag=now;
+  }
+  static uint32_t lastWifiDiag=0;
+  if(now-lastWifiDiag>=15000 && now-lastStatus>=700 && now-lastStatus<800) {
+    char info[48];snprintf(info,sizeof(info),"WIFI_DIAG ps_off=%d",wifiPsDisabled.load(std::memory_order_relaxed));
+    status(info);lastWifiDiag=now;
   }
   // A local counter update is informative only: it is NOT the server draft.
   // Rate-limit to protect the GPIO/NVS task; output may be dropped when full.

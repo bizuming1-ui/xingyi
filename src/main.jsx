@@ -51,7 +51,15 @@ function App(){
    const orderId=selected;setOrderDeviceView({orderId,type:'loading'});
    const monitor=new DeviceMonitor(new DeviceDraftData(db),{interval:250});
    monitor.start(orderId,event=>setOrderDeviceView({orderId,...event}));
-   return ()=>monitor.stop();
+   // Isolated test only. Realtime is an untrusted notification, not a source
+   // of counts or permission to confirm. Keep the existing polling fallback.
+   let channel=null;
+   try {
+     channel=db.channel(`draft-hint:${orderId}`).on('postgres_changes',
+       {event:'*',schema:'public',table:'device_order_drafts',filter:`order_id=eq.${orderId}`},
+       ()=>monitor.refreshSoon()).subscribe(status=>{if(status==='SUBSCRIBED')monitor.refreshSoon()});
+   } catch { /* polling remains active if the channel cannot be created */ }
+   return ()=>{monitor.stop();if(channel)void db.removeChannel(channel);};
  },[session,access,page,selected]);
  useEffect(()=>{ // Only permit document scrolling while the on-screen keyboard is open.
    const viewport=window.visualViewport; let baseline=viewport?.height||window.innerHeight;

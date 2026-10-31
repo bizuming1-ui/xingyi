@@ -70,26 +70,42 @@ export class DeviceDraftData {
 export class DeviceMonitor {
   constructor(data,{interval=500,setTimer=(fn,ms)=>globalThis.setTimeout(fn,ms),clearTimer=id=>globalThis.clearTimeout(id),now=()=>globalThis.performance.now()}={}) {
     if(!Number.isFinite(interval) || interval<200)throw new Error('刷新间隔无效。');
-    this.data=data;this.interval=interval;this.setTimer=setTimer;this.clearTimer=clearTimer;this.now=now;this.generation=0;this.timer=null;
+    this.data=data;this.interval=interval;this.setTimer=setTimer;this.clearTimer=clearTimer;this.now=now;this.generation=0;this.timer=null;this.timerToken=0;this.poll=null;this.inFlight=false;this.dirty=false;this.kickScheduled=false;this.failed=false;
   }
   start(orderId,onUpdate) {
     if(!uuid(orderId) || typeof onUpdate!=='function')throw new Error('设备监控参数无效。');
     this.stop();const generation=this.generation;
-    const poll=async()=>{
-      if(this.generation!==generation)return;
-      this.timer=null;
+    this.poll=async()=>{
+      if(this.generation!==generation || this.inFlight)return;
+      this.timer=null;this.kickScheduled=false;this.inFlight=true;this.dirty=false;
       let event;const startedAt=this.now();
       try {event={type:'snapshot',snapshot:await this.data.load(orderId),startedAt};}
       catch {event={type:'error',message:'设备数据刷新失败，请检查网络。'};}
       if(this.generation!==generation)return;
-      onUpdate(event);
-      // Network failures back off to avoid a 4 Hz retry storm on weak links.
-      if(this.generation===generation)this.timer=this.setTimer(poll,event.type==='error'?Math.max(1000,this.interval):this.interval);
+      this.inFlight=false;this.failed=event.type==='error';onUpdate(event);
+      // Events are hints only. If one arrived while the read was in flight,
+      // re-read after it completes; no parallel or stale-order reads.
+      if(this.generation===generation)this.schedule(!this.failed && this.dirty?100:(this.failed?Math.max(1000,this.interval):this.interval),!this.failed && this.dirty);
     };
-    void poll();
+    void this.poll();
+  }
+  schedule(ms,kick=false) {
+    const generation=this.generation, token=++this.timerToken;
+    this.kickScheduled=kick;
+    this.timer=this.setTimer(()=>{if(this.generation!==generation || this.timerToken!==token)return;this.timer=null;this.kickScheduled=false;void this.poll?.();},ms);
+  }
+  // Realtime messages never carry authoritative state: they request an
+  // authenticated re-read. Coalesce events and preserve error backoff.
+  refreshSoon() {
+    if(!this.poll || this.failed)return;
+    if(this.inFlight){this.dirty=true;return;}
+    if(this.kickScheduled)return;
+    if(this.timer!==null)this.clearTimer(this.timer);
+    this.schedule(100,true);
   }
   stop() {
-    ++this.generation;
-    if(this.timer!==null){this.clearTimer(this.timer);this.timer=null;}
+    ++this.generation;++this.timerToken;
+    if(this.timer!==null)this.clearTimer(this.timer);
+    this.timer=null;this.poll=null;this.inFlight=false;this.dirty=false;this.kickScheduled=false;this.failed=false;
   }
 }
