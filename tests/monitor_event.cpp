@@ -8,7 +8,7 @@ int main(){
  assert(formatMonitorEvent(e,1,s,sizeof s)>0 && strcmp(s,"M2 i=42 h=200 s=5 n=0 u=1")==0);
  assert(formatMonitorEvent(e,2,s,sizeof s)>0 && strcmp(s,"M3 i=42 x=55")==0);
  e.ticket=UINT32_MAX;e.endMs=UINT32_MAX;e.durationMs=UINT32_MAX;e.total=UINT64_MAX;
- for(unsigned i=0;i<3;i++)assert(formatMonitorEvent(e,i,s,sizeof s)>0 && strlen(s)<64);
- assert(formatMonitorEvent(e,3,s,sizeof s)<0);
+ for(unsigned i=0;i<4;i++)assert(formatMonitorEvent(e,i,s,sizeof s)>0 && strlen(s)<64);
+ assert(formatMonitorEvent(e,3,s,sizeof s)>0);assert(formatMonitorEvent(e,4,s,sizeof s)<0);
  std::cout<<"numeric monitor formatting tests passed\n";
 }

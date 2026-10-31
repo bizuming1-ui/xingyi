@@ -38,9 +38,13 @@ class HttpRpcExchange final : public RpcExchange {
   int lastHttpStatus() const {return httpStatus_;}
   bool lastReused() const {return lastReused_;}
   bool lastPollYielded() const {return lastPollYielded_;}
+  int connectMillis() const {return connectMs_;}
+  int sentMillis() const {return sentMs_;}
+  int firstByteMillis() const {return firstMs_;}
+  unsigned receivedBytes() const {return receivedBytes_;}
   void validPoll() override {if(pollYield_)pollYield_->validPoll();}
   Response post(const char* endpoint,const char* json,size_t jsonLength,char* response,size_t responseCapacity) override {
-    Response result{};stage_=Stage::Validate;status_=Status::NetworkError;httpStatus_=0;lastReused_=false;lastPollYielded_=false;
+    Response result{};stage_=Stage::Validate;status_=Status::NetworkError;httpStatus_=0;lastReused_=false;lastPollYielded_=false;connectMs_=sentMs_=firstMs_=-1;receivedBytes_=0;
     struct Capture { HttpRpcExchange& owner; Response& response;
       ~Capture(){owner.status_=response.status;owner.httpStatus_=response.httpStatus;}
     } capture{*this,result};
@@ -62,6 +66,8 @@ class HttpRpcExchange final : public RpcExchange {
     const bool isPoll=strcmp(endpoint,RpcCodec::endpoint(SyncPlanner::Kind::Poll))==0;
     if(isPoll && pollYield_)pollYield_->beginPoll();
     const uint32_t start=channel_.nowMillis();
+    GraceInterrupt grace(channel_,pollYield_);
+    struct Timing {HttpRpcExchange& owner;uint32_t start;~Timing(){if(owner.stage_==Stage::Connect && owner.connectMs_<0)owner.connectMs_=static_cast<int>(owner.channel_.nowMillis()-start);}} timing{*this,start};
     struct Closer { HttpRpcExchange& owner; bool keep; explicit Closer(HttpRpcExchange& x):owner(x),keep(false){} ~Closer(){if(!keep)owner.close();} } closer(*this);
     stage_=Stage::Connect;
     if(connected_ && (!keepAlive_ || static_cast<uint32_t>(start-lastUsed_)>=5000 || !channel_.canReuse()))close();
@@ -71,23 +77,27 @@ class HttpRpcExchange final : public RpcExchange {
       if(connected!=VerifiedTlsChannel::Connect::Ok) {channel_.close();result.status=connected==VerifiedTlsChannel::Connect::Timeout?Status::Timeout:Status::NetworkError;return result;}
       connected_=true;
     }
+    connectMs_=static_cast<int>(channel_.nowMillis()-start);
     if(!remaining(start)) { result.status=Status::Timeout; return result; }
     stage_=Stage::Send;
     int failure=writeAll(headers,static_cast<size_t>(n),start);
     if(!failure) failure=writeAll(json,jsonLength,start);
     if(failure) { result.status=failure==-2?Status::Timeout:Status::NetworkError; return result; }
+    sentMs_=static_cast<int>(channel_.nowMillis()-start);
     stage_=Stage::Receive;
     HttpResponseDecoder parser(response,responseCapacity);
     struct ReadBuffer { char data[256]{}; ~ReadBuffer(){RpcCodec::wipe(data,sizeof(data));} } block;
     for (;;) {
       const uint32_t left=remaining(start);
       if(!left){result.status=Status::Timeout;return result;}
-      const int count=isPoll && pollYield_?channel_.readInterruptible(block.data,sizeof(block.data),left,pollYield_):channel_.read(block.data,sizeof(block.data),left);
+      const int count=isPoll && pollYield_?channel_.readInterruptible(block.data,sizeof(block.data),left,&grace):channel_.read(block.data,sizeof(block.data),left);
       if(count==-3 && isPoll && pollYield_) {pollYield_->yielded();lastPollYielded_=true;result.status=Status::Interrupted;return result;}
       if(!remaining(start)){result.status=Status::Timeout;return result;}
       if(count<=0 || static_cast<size_t>(count)>sizeof(block.data)) {
         result.status=count==-2?Status::Timeout:Status::NetworkError; return result;
       }
+      if(firstMs_<0)firstMs_=static_cast<int>(channel_.nowMillis()-start);
+      receivedBytes_+=static_cast<unsigned>(count);
       const auto parsed=parser.feed(block.data,static_cast<size_t>(count));
       if(parsed==HttpResponseDecoder::Result::Complete) {
         stage_=Stage::Complete;result.status=Status::Ok;result.httpStatus=parser.statusCode();result.length=parser.length();
@@ -100,9 +110,24 @@ class HttpRpcExchange final : public RpcExchange {
     }
   }
  private:
+  // Allow a short opportunity for the existing response to finish, avoiding
+  // needless TLS reconnection. This is a bounded heuristic, not a guarantee.
+  class GraceInterrupt final : public ReadInterrupt {
+   public:
+    GraceInterrupt(VerifiedTlsChannel& c,PollYieldPolicy* p):channel_(c),policy_(p){}
+    bool interrupted() const override {
+      if(!policy_ || !policy_->interrupted())return false;
+      const uint32_t now=channel_.nowMillis();
+      if(!seen_){seen_=true;at_=now;return false;}
+      return static_cast<uint32_t>(now-at_)>=250;
+    }
+   private:
+    VerifiedTlsChannel& channel_;PollYieldPolicy* policy_;mutable bool seen_=false;mutable uint32_t at_=0;
+  };
   VerifiedTlsChannel& channel_; const char* host_;const char* key_;uint32_t timeoutMs_,dataTimeoutMs_,activeTimeoutMs_;
   bool keepAlive_=false,connected_=false,lastReused_=false,lastPollYielded_=false;PollYieldPolicy* pollYield_=nullptr;uint32_t lastUsed_=0;
   Stage stage_=Stage::Idle;Status status_=Status::NetworkError;int httpStatus_=0;
+  int connectMs_=-1,sentMs_=-1,firstMs_=-1;unsigned receivedBytes_=0;
   uint32_t remaining(uint32_t start) {const uint32_t elapsed=channel_.nowMillis()-start;return elapsed>=activeTimeoutMs_?0:activeTimeoutMs_-elapsed;}
   int writeAll(const char* data,size_t length,uint32_t start) {
     size_t sent=0;

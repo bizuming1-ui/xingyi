@@ -102,6 +102,7 @@ class SerialRpcMonitor final : public RpcObserver {
     if(attempted && outcome.result!=RpcWorker::Result::InvalidRequest) {
       event_.http=exchange_.lastHttpStatus();event_.stage=static_cast<int>(exchange_.lastStage());
       event_.net=static_cast<int>(exchange_.lastStatus());event_.reused=exchange_.lastReused()?1:0;
+      event_.connectMs=exchange_.connectMillis();event_.sentMs=exchange_.sentMillis();event_.firstMs=exchange_.firstByteMillis();event_.rxBytes=exchange_.receivedBytes();
     } else {event_.net=-1;}
     // Normal status polls are omitted; failures and all upload/barrier
     // transactions are recorded. Gaps in ticket numbers are expected.
@@ -114,7 +115,7 @@ class SerialRpcMonitor final : public RpcObserver {
     char line[80];const int n=formatMonitorEvent(display_,part_,line,sizeof(line));
     if(n<=0 || static_cast<size_t>(n)>=sizeof(line)) {lost_.fetch_add(1,std::memory_order_relaxed);active_=false;return;}
     if(!bestEffortLine(Serial,line))return;
-    if(++part_==3)active_=false;
+    if(++part_==4)active_=false;
   }
   uint32_t lost() const {return lost_.load(std::memory_order_relaxed);}
  private:

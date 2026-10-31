@@ -10,10 +10,11 @@ struct FakeTls : VerifiedTlsChannel {
   Connect connectVerified(const char* host,uint16_t port,uint32_t timeout) override {++connects;assert(strcmp(host,"project123.supabase.co")==0 && port==443 && timeout>0);return failConnect?Connect::Error:Connect::Ok;}
   int write(const char* data,size_t length,uint32_t timeout) override {assert(timeout);++calls;if(failWrite)return -1;size_t n=length<static_cast<size_t>(maxWrite)?length:static_cast<size_t>(maxWrite);sent.append(data,n);++time;return static_cast<int>(n);}
   int read(char* out,size_t cap,uint32_t timeout) override {assert(timeout);++calls;if(timeoutRead)return -2;if(late)time+=timeout;else {time+=readDelay+1;readDelay=0;}if(cursor==incoming.size())return 0;size_t n=incoming.size()-cursor;if(n>cap)n=cap;if(n>static_cast<size_t>(maxRead))n=maxRead;memcpy(out,incoming.data()+cursor,n);cursor+=n;return static_cast<int>(n);}
-  PollYieldPolicy* simulateCount=nullptr;int interruptedReads=0;
+  PollYieldPolicy* simulateCount=nullptr;int interruptedReads=0;bool simulateStall=false;
   int readInterruptible(char* out,size_t cap,uint32_t timeout,const ReadInterrupt* interrupt) override {
     if(simulateCount){simulateCount->accepted();simulateCount=nullptr;}
     if(interrupt && interrupt->interrupted()){++interruptedReads;return -3;}
+    if(simulateStall && interrupt){time+=250;if(interrupt->interrupted()){++interruptedReads;return -3;}}
     return read(out,cap,timeout);
   }
   void close() override {++closes;}
@@ -29,6 +30,7 @@ int main(){
   auto outcome=RpcWorker::execute(exchange,cmd,secret,reply);
   assert(outcome.result==RpcWorker::Result::Ok && reply.success && socket.closes==1);
   assert(exchange.lastStage()==HttpRpcExchange::Stage::Complete && exchange.lastStatus()==RpcExchange::Status::Ok && exchange.lastHttpStatus()==200);
+  assert(exchange.connectMillis()==0 && exchange.sentMillis()>0 && exchange.firstByteMillis()>=exchange.sentMillis() && exchange.receivedBytes()>0);
   assert(socket.sent.find("POST /rest/v1/rpc/device_status HTTP/1.1\r\nHost: project123.supabase.co\r\napikey: sb_publishable_public-key\r\n") == 0);
   assert(socket.sent.find("Authorization:")==std::string::npos);
   assert(socket.sent.find(secret)>socket.sent.find("\r\n\r\n"));
@@ -102,11 +104,16 @@ int main(){
   preempt.incoming="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\n\r\n"+body;
   HttpRpcExchange prioritized(preempt,"project123.supabase.co",key,5000,5000,true,&priority);
   assert(RpcWorker::execute(prioritized,cmd,secret,reply).result==RpcWorker::Result::Ok);
-  preempt.simulateCount=&priority;
+  preempt.simulateCount=&priority;preempt.simulateStall=true;
   assert(RpcWorker::execute(prioritized,cmd,secret,reply).result==RpcWorker::Result::TransportError);
+  preempt.simulateStall=false;
   assert(prioritized.lastPollYielded() && preempt.interruptedReads==1 && preempt.closes==1 && !reply.success);
   preempt.incoming="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\n\r\n"+body;preempt.cursor=0;
   preempt.simulateCount=&priority;
+  assert(RpcWorker::execute(prioritized,cmd,secret,reply).result==RpcWorker::Result::Ok);
+  assert(!prioritized.lastPollYielded() && preempt.interruptedReads==1);
+  // A response arriving within the grace interval completes and is reusable.
+  preempt.incoming="HTTP/1.1 200 OK\r\nContent-Length: "+std::to_string(body.size())+"\r\n\r\n"+body;preempt.cursor=0;preempt.simulateCount=&priority;
   assert(RpcWorker::execute(prioritized,cmd,secret,reply).result==RpcWorker::Result::Ok);
   assert(!prioritized.lastPollYielded() && preempt.interruptedReads==1);
   // Uploads, renewals and all other requests do not use the interruptible read.
