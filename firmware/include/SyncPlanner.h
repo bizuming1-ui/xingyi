@@ -88,6 +88,12 @@ class SyncPlanner {
     // This reduces the upload/poll alternation overhead without starving
     // binding changes or confirmation discovery indefinitely.
     const bool uploadPending=counter_.isReady() && counter_.pending()>0;
+    // Allow one immediate idempotent cumulative retry after a failed upload
+    // per successfully decoded poll. The following scheduling opportunity
+    // returns to the usual bounded poll fairness, even if retry also fails.
+    if (favorUpload_ && polled_ && uploadPending && retryUploadOnce_) {
+      retryUploadOnce_=false;retryUploadUsed_=true;return issue(Kind::Upload,now);
+    }
     if (!polled_ || (!justPolled && elapsed(now,lastPoll_)>=500 &&
         (!favorUpload_ || !uploadPending || uploadsSincePoll_>=2))) return issue(Kind::Poll,now);
     if (counter_.isReady() && (!streamRegistered_ || counter_.pending()>0)) return issue(Kind::Upload,now);
@@ -123,6 +129,8 @@ class SyncPlanner {
     if (!hasInFlight() || ticket!=inFlight_.ticket) return false;
     const Command sent=inFlight_; inFlight_={};
     if (!reply.success) {
+      if (favorUpload_ && sent.kind==Kind::Upload && !retryUploadUsed_ && polled_ && counter_.pending()>0)
+        retryUploadOnce_=true;
       if (counter_.isFrozen()) needBarrierStatus_=true;
       return true;
     }
@@ -138,7 +146,7 @@ class SyncPlanner {
           // Server says it is frozen, but local journal does not: never guess.
           setFault(FaultReason::RemoteFrozenWithoutJournal);
         } else { copy(barrier_,reply.barrier); remoteBarrier_=reply.barrierState; }
-        polled_=true;pollJustCompleted_=true; break;
+        polled_=true;pollJustCompleted_=true;retryUploadUsed_=false;retryUploadOnce_=false; break;
       }
       case Kind::Upload: {
         if (reply.acceptedTotal!=sent.total || strcmp(sent.epoch,counter_.state().epochId)!=0 || strcmp(sent.binding,counter_.state().bindingId)!=0) { setFault(FaultReason::UploadMismatch); break; }
@@ -181,7 +189,7 @@ class SyncPlanner {
   void setFault(FaultReason reason) {fault_=true;faultReason_=reason;}
   bool fault_=false, sentAny_=false, polled_=false, pollJustCompleted_=false, streamRegistered_=false, needBarrierStatus_=false, mustAbort_=false, renewed_=false, epochAttempted_=false;
   uint32_t lastSent_=0,lastPoll_=0,lastRenew_=0,lastEpochAttempt_=0,nextTicket_=0;
-  unsigned uploadsSincePoll_=0;
+  unsigned uploadsSincePoll_=0;bool retryUploadOnce_=false,retryUploadUsed_=false;
   uint64_t desiredRevision_=0;
   char desiredOrder_[37]{},desiredBinding_[37]{},barrier_[37]{},nonce_[37]{};
   BarrierState remoteBarrier_=BarrierState::None;

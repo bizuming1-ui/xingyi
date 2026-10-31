@@ -156,6 +156,37 @@ int main(){
  assert(fast.complete(fastCmd.ticket,status(order1,binding1,1,B::Requested),1501));
  fastCmd=fast.next(1700);assert(fastCmd.kind==K::Freeze && fastCounter.isFrozen());
 
+ // After an uncertain upload response, allow at most one cumulative retry
+ // before polling again. New counts keep the same original binding and epoch.
+ Store rs;DurableCounter rc(rs);assert(rc.load()==R::Ok);
+ assert(rc.bind(order1,1,binding1,"10000000-0000-4000-8000-000000000001")==R::Ok);
+ Epochs re;SyncPlanner recovering(rc,re,true);auto q=recovering.next(0);
+ assert(recovering.complete(q.ticket,status(order1,binding1,1),0));
+ q=recovering.next(200);assert(q.kind==K::Upload);assert(recovering.complete(q.ticket,accepted(0),201));
+ assert(recovering.count(1)==R::Ok);q=recovering.next(700);assert(q.kind==K::Upload && q.total==1);
+ SyncPlanner::Reply failedReply{};assert(recovering.complete(q.ticket,failedReply,800));
+ assert(recovering.count(2)==R::Ok);q=recovering.next(900);assert(q.kind==K::Upload && q.total==3);
+ assert(strcmp(q.binding,binding1)==0 && strcmp(q.epoch,"10000000-0000-4000-8000-000000000001")==0);
+ assert(recovering.complete(q.ticket,failedReply,1000));q=recovering.next(1100);assert(q.kind==K::Poll);
+ assert(recovering.complete(q.ticket,failedReply,1200));q=recovering.next(1600);assert(q.kind==K::Upload);
+ assert(recovering.complete(q.ticket,failedReply,1601));q=recovering.next(1800);assert(q.kind==K::Upload);
+ assert(recovering.complete(q.ticket,failedReply,1801));q=recovering.next(2000);assert(q.kind==K::Poll);
+ assert(recovering.complete(q.ticket,status(order1,binding1,1,B::Requested),2001));
+ q=recovering.next(2200);assert(q.kind==K::Upload && q.total==3);
+ assert(recovering.complete(q.ticket,accepted(3),2201));
+ q=recovering.next(2400);assert(q.kind==K::Freeze && rc.isFrozen());
+ // A successful retry still yields to poll when the two-upload budget is met.
+ Store rs2;DurableCounter rc2(rs2);assert(rc2.load()==R::Ok);
+ assert(rc2.bind(order1,1,binding1,"10000000-0000-4000-8000-000000000001")==R::Ok);
+ Epochs re2;SyncPlanner r2(rc2,re2,true);auto r=r2.next(0);assert(r2.complete(r.ticket,status(order1,binding1,1),1));
+ r=r2.next(200);assert(r2.complete(r.ticket,accepted(0),201));assert(r2.count(1)==R::Ok);
+ r=r2.next(700);assert(r.kind==K::Upload && r2.complete(r.ticket,failedReply,701));
+ r=r2.next(900);assert(r.kind==K::Upload && r.total==1);assert(r2.count(1)==R::Ok);
+ assert(r2.complete(r.ticket,accepted(1),901));r=r2.next(1100);assert(r.kind==K::Poll);
+ assert(r2.complete(r.ticket,status(order1,binding1,1,B::Requested),1101));
+ r=r2.next(1300);assert(r.kind==K::Upload && r.total==2);assert(r2.complete(r.ticket,accepted(2),1301));
+ r=r2.next(1500);assert(r.kind==K::Freeze && rc2.isFrozen());
+
  // Fail closed if server claims an impossible acknowledgement.
  Store store2; DurableCounter c2(store2); assert(c2.load()==R::Ok); Epochs epochs2; SyncPlanner invalid(c2,epochs2);
  auto step=invalid.next(0); assert(invalid.complete(step.ticket,status(order1,binding1,1),0));

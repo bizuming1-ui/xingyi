@@ -1,4 +1,5 @@
 #include "NetworkObservations.h"
+#include "InputDiagnostics.h"
 // Candidate integration firmware: do not deploy to production until the real
 // service, timing, NVS, freeze and hardware behavior have been validated.
 #include <Arduino.h>
@@ -143,7 +144,7 @@ bool initialized=false;
 const char* startupFault="FAULT: initialization incomplete; counting stopped";
 DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
 uint32_t lastStatus=0,lastDiagnostic=0,lastTlsIo=0,lastRpcDiag=0,lastFreezeDiag=0,lastBarrierRpcDiag=0;
-CountLineThrottle countLine;
+CountLineThrottle countLine;InputDiagnostics inputDiagnostics;
 
 // Console output is best-effort and never waits for an attached terminal. No
 // secret, SSID, device ID, production-order UUID or request body is printed.
@@ -316,6 +317,7 @@ void loop() {
   if(!initialized){const uint32_t now=millis();if(now-lastStatus>=5000){lastStatus=now;status(startupFault);}delay(100);return;}
   const uint32_t now=millis();
   const auto sample=input->tick(digitalRead(BUTTON_PIN)==LOW,now);
+  inputDiagnostics.sample(now,sample.accepted,sample.rejected,counter.pending());
   if(sample.accepted)pollYield.accepted();
   controller->step(now);
   if(controller->faulted() || sample.status==DeviceInput::Status::StorageError || sample.status==DeviceInput::Status::CapacityFull || sample.status==DeviceInput::Status::Fault)
@@ -351,6 +353,13 @@ void loop() {
       static_cast<unsigned long>(obs.ok),static_cast<unsigned long>(obs.fail),static_cast<unsigned long>(obs.timeout),
       static_cast<unsigned long>(obs.yield),obs.everOk?static_cast<long long>(static_cast<uint32_t>(snapNow-obs.lastOk)):-1LL);
     status(info);lastNetSummary=now;
+  }
+  static uint32_t lastInputDiag=0;
+  if(now-lastInputDiag>=15000 && now-lastStatus>=800 && now-lastStatus<850) {
+    char info[96];snprintf(info,sizeof(info),"INPUT maxgap=%lu batch=%lu reject=%lu peak=%llu",
+      static_cast<unsigned long>(inputDiagnostics.maxGap()),static_cast<unsigned long>(inputDiagnostics.maxBatch()),
+      static_cast<unsigned long>(inputDiagnostics.rejected()),static_cast<unsigned long long>(inputDiagnostics.peakPending()));
+    status(info);lastInputDiag=now;
   }
   // Separate from the status and MON lines so a small TX buffer can drain.
   // This is a best-effort snapshot, not proof of a reset cause.
