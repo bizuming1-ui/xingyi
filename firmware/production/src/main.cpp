@@ -31,6 +31,7 @@
 #include "BestEffortSerial.h"
 #include "UsbSerialRecovery.h"
 #include "ProgressWatchdog.h"
+#include "WatchdogResetMarker.h"
 
 namespace {
 constexpr int BUTTON_PIN=4;
@@ -73,6 +74,9 @@ std::atomic<uint32_t> countProgress{0},networkProgress{0};
 // stored in counter NVS; brownouts/power loss need not preserve this budget.
 RTC_NOINIT_ATTR WatchdogRestartBudget::Record watchdogHistory;
 WatchdogRestartBudget watchdogBudget(watchdogHistory);
+RTC_NOINIT_ATTR WatchdogResetMarker::Record watchdogResetRecord;
+WatchdogResetMarker watchdogResetMarker(watchdogResetRecord);
+bool previousWatchdogAttempt=false;
 std::atomic<bool> radioOnline{false},timeTrusted{false};
 std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
 std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0},timeBudget{0};
@@ -191,8 +195,10 @@ void watchdogTask(void*) {
       const uint32_t checkNow=millis();
       const bool stillStalled=static_cast<uint32_t>(checkNow-latestCount)>=ProgressWatchdog::STALL_MS ||
                               static_cast<uint32_t>(checkNow-latestNet)>=ProgressWatchdog::STALL_MS;
-      if(stillStalled && !stopNetwork.load(std::memory_order_acquire) && digitalRead(BUTTON_PIN)!=LOW && watchdogBudget.reserve())
+      if(stillStalled && !stopNetwork.load(std::memory_order_acquire) && digitalRead(BUTTON_PIN)!=LOW && watchdogBudget.reserve()) {
+        watchdogResetMarker.markAttempt();
         esp_restart(); // retained counter and freeze journal are never erased
+      }
     }
     vTaskDelay(pdMS_TO_TICKS(500));
   }
@@ -210,6 +216,8 @@ const char* statusName(DeviceInput::Status s) {
 }
 }
 void setup() {
+  // Consume once even when configuration or NVS initialization fails.
+  previousWatchdogAttempt=watchdogResetMarker.consume(esp_reset_reason()==ESP_RST_SW);
   Serial.begin(115200);
 #if ARDUINO_USB_CDC_ON_BOOT
   // HWCDC's default TX mutex timeout is 100ms. Diagnostics must never hold
@@ -307,9 +315,13 @@ void loop() {
   if(now-lastMonitorNotice>=15000) {
     char info[64];snprintf(info,sizeof(info),"MON v=1 t=%lu lost=%lu",static_cast<unsigned long>(now),static_cast<unsigned long>(rpcMonitor->lost()));
     status(info);lastMonitorNotice=now;
-    // A periodic boot reason survives late serial attachment, but SW reset is
-    // not by itself evidence that the progress supervisor caused the reset.
-    char wd[80];snprintf(wd,sizeof(wd),"WDT_DIAG reset=%d attempts=%lu hold=%d",static_cast<int>(esp_reset_reason()),static_cast<unsigned long>(watchdogAttempts.load(std::memory_order_relaxed)),watchdogHold.load(std::memory_order_relaxed)?1:0);status(wd);
+  }
+  // Separate from the status and MON lines so a small TX buffer can drain.
+  // This is a best-effort snapshot, not proof of a reset cause.
+  static uint32_t lastWatchdogDiag=0;
+  if(now-lastWatchdogDiag>=15000 && now-lastStatus>=300 && now-lastStatus<400) {
+    char wd[96];snprintf(wd,sizeof(wd),"WDT_DIAG reset=%d attempts=%lu hold=%d prior=%d",static_cast<int>(esp_reset_reason()),static_cast<unsigned long>(watchdogAttempts.load(std::memory_order_relaxed)),watchdogHold.load(std::memory_order_relaxed)?1:0,previousWatchdogAttempt?1:0);
+    status(wd);lastWatchdogDiag=now;
   }
   // A local counter update is informative only: it is NOT the server draft.
   // Rate-limit to protect the GPIO/NVS task; output may be dropped when full.
