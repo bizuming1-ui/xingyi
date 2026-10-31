@@ -1,0 +1,373 @@
+// Candidate integration firmware: do not deploy to production until the real
+// service, timing, NVS, freeze and hardware behavior have been validated.
+#include <Arduino.h>
+#include <ArduinoJson.h> // PlatformIO library discovery
+#include <Preferences.h>
+#include <WiFi.h>
+#include <mbedtls/x509_crt.h>
+#include <esp_system.h>
+#include <esp_attr.h>
+#if ARDUINO_USB_CDC_ON_BOOT && CONFIG_IDF_TARGET_ESP32S3
+#include "hal/usb_serial_jtag_ll.h"
+#endif
+#include <atomic>
+#include "config.local.h"
+#include "RuntimeConfig.h"
+#include "PreferencesCounterStorage.h"
+#include "FreeRtosSyncMailbox.h"
+#include "DeviceInput.h"
+#include "EspWifiEntropy.h"
+#include "EspWifiStation.h"
+#include "EspAsyncDnsBackend.h"
+#include "EspTcpOps.h"
+#include "ResolvedTcpConnect.h"
+#include "MbedTlsSession.h"
+#include "VerifiedConnect.h"
+#include "MbedTlsChannel.h"
+#include "EspMonotonicMillis.h"
+#include "FreeRtosRadioLifecycleLock.h"
+#include "AuthenticatedNetworkTime.h"
+#include "MonitorEvent.h"
+#include "BestEffortSerial.h"
+#include "UsbSerialRecovery.h"
+#include "ProgressWatchdog.h"
+#include "WatchdogResetMarker.h"
+
+namespace {
+constexpr int BUTTON_PIN=4;
+constexpr uint32_t NETWORK_TIMEOUT_MS=3000;
+// Experimental longer budget for status and count upload only.
+constexpr uint32_t DATA_RPC_TIMEOUT_MS=8000;
+// Proactive and first recovery attempts stay short. If hard recovery times
+// out, allow the next authenticated proof more time on slow links. This can
+// delay network work but never permits an expired time window or lease.
+constexpr uint32_t TIME_BOOTSTRAP_TIMEOUT_MS=4500;
+constexpr uint32_t TIME_RECOVERY_TIMEOUT_MS=11000;
+static_assert(TIME_RECOVERY_TIMEOUT_MS < TimeProof::MAX_ROUND_TRIP_MS,"proof timeout must remain bounded");
+constexpr uint32_t NETWORK_STACK_BYTES=24576;
+constexpr uint32_t WATCHDOG_STACK_BYTES=4096;
+constexpr uint32_t STATUS_INTERVAL_MS=1000;
+RuntimeConfig config{WIFI_SSID,WIFI_PASSWORD,SUPABASE_HOST,SUPABASE_PUBLISHABLE_KEY,
+ DEVICE_ID,DEVICE_SECRET,SUPABASE_CA_PEM,TIME_LIFETIME_MS,CLOCK_DRIFT_PPM};
+class Clock final : public ConnectionClock, public NetworkTaskClock {
+ public: uint32_t nowMillis() override {return millis();}
+};
+class Yield final : public NetworkYield {
+ public: void yield() override {vTaskDelay(1);}
+};
+PreferencesCounterStorage storage;
+DurableCounter counter(storage);
+// Construct task and hardware-dependent objects in setup, after scheduler start.
+SyncController* controller=nullptr;
+SyncPlanner* countPlanner=nullptr;
+DeviceInput* input=nullptr;
+NetworkTaskCoordinator* network=nullptr;
+GuardedWifiSupervisor* networkWifi=nullptr;
+EspWifiStation* networkStation=nullptr;
+AuthenticatedNetworkTime* networkTime=nullptr;
+SyncNetworkWorker* networkWorker=nullptr;
+HttpRpcExchange* networkExchange=nullptr;
+std::atomic<bool> stopNetwork{false};
+std::atomic<bool> watchdogEnabled{false},watchdogHold{false};
+std::atomic<uint32_t> watchdogAttempts{0};
+std::atomic<uint32_t> countProgress{0},networkProgress{0};
+// Retained across software reset only on supported ESP32-S3 hardware. Never
+// stored in counter NVS; brownouts/power loss need not preserve this budget.
+RTC_NOINIT_ATTR WatchdogRestartBudget::Record watchdogHistory;
+WatchdogRestartBudget watchdogBudget(watchdogHistory);
+RTC_NOINIT_ATTR WatchdogResetMarker::Record watchdogResetRecord;
+WatchdogResetMarker watchdogResetMarker(watchdogResetRecord);
+bool previousWatchdogAttempt=false;
+std::atomic<bool> radioOnline{false},timeTrusted{false};
+std::atomic<int> wifiPsDisabled{-1},wifiPsSet{-2};
+PollYieldPolicy pollYield;
+std::atomic<int> timeStage{0},timeResult{2},timeDetail{0};
+std::atomic<uint32_t> timeStart{0},timeTx{0},timeRx{0},timeBudget{0};
+std::atomic<int> rpcKind{0},rpcResult{1},rpcStage{0},rpcNet{1},rpcHttp{0},rpcReuse{0};
+std::atomic<int> barrierRpcKind{0},barrierRpcResult{1},barrierRpcStage{0},barrierRpcNet{1},barrierRpcHttp{0},barrierRpcReuse{0};
+// The network task only enqueues numeric events with zero wait. Serial output
+// is owned by the counting task and also never waits. Overflow affects only
+// diagnostics, never commands, replies or persisted counts.
+class SerialRpcMonitor final : public RpcObserver {
+ public:
+  explicit SerialRpcMonitor(HttpRpcExchange& exchange):exchange_(exchange) {
+    queue_=xQueueCreateStatic(CAPACITY,sizeof(MonitorEvent),storage_,&control_);
+  }
+  void begin(SyncPlanner::Kind kind,uint32_t ticket,uint64_t total) override {
+    event_=MonitorEvent{};event_.ticket=ticket;event_.kind=static_cast<int>(kind);event_.total=total;started_=millis();
+  }
+  void end(const RpcWorker::Outcome& outcome,SyncPlanner::BarrierState state,bool attempted) override {
+    event_.endMs=millis();event_.durationMs=static_cast<uint32_t>(event_.endMs-started_);
+    event_.result=attempted?static_cast<int>(outcome.result):5;event_.barrier=static_cast<int>(state);
+    if(attempted && outcome.result!=RpcWorker::Result::InvalidRequest) {
+      event_.http=exchange_.lastHttpStatus();event_.stage=static_cast<int>(exchange_.lastStage());
+      event_.net=static_cast<int>(exchange_.lastStatus());event_.reused=exchange_.lastReused()?1:0;
+      event_.connectMs=exchange_.connectMillis();event_.sentMs=exchange_.sentMillis();event_.firstMs=exchange_.firstByteMillis();event_.rxBytes=exchange_.receivedBytes();
+    } else {event_.net=-1;}
+    // Normal status polls are omitted; failures and all upload/barrier
+    // transactions are recorded. Gaps in ticket numbers are expected.
+    if(event_.kind==static_cast<int>(SyncPlanner::Kind::Poll) && event_.result==0)return;
+    if(!queue_ || xQueueSend(queue_,&event_,0)!=pdTRUE)lost_.fetch_add(1,std::memory_order_relaxed);
+  }
+  // Called by counting thread only; never blocks if serial is not draining.
+  void drain() {
+    if(!active_) {if(!queue_ || xQueueReceive(queue_,&display_,0)!=pdTRUE)return;active_=true;part_=0;}
+    char line[80];const int n=formatMonitorEvent(display_,part_,line,sizeof(line));
+    if(n<=0 || static_cast<size_t>(n)>=sizeof(line)) {lost_.fetch_add(1,std::memory_order_relaxed);active_=false;return;}
+    if(!bestEffortLine(Serial,line))return;
+    if(++part_==4)active_=false;
+  }
+  uint32_t lost() const {return lost_.load(std::memory_order_relaxed);}
+ private:
+  static constexpr unsigned CAPACITY=16;
+  HttpRpcExchange& exchange_;StaticQueue_t control_{};uint8_t storage_[CAPACITY*sizeof(MonitorEvent)]{};QueueHandle_t queue_=nullptr;
+  MonitorEvent event_{},display_{};uint32_t started_=0;std::atomic<uint32_t> lost_{0};bool active_=false;unsigned part_=0;
+};
+SerialRpcMonitor* rpcMonitor=nullptr;
+bool initialized=false;
+const char* startupFault="FAULT: initialization incomplete; counting stopped";
+DeviceInput::Status priorStatus=DeviceInput::Status::Ready;
+uint32_t lastStatus=0,lastDiagnostic=0,lastTlsIo=0,lastRpcDiag=0,lastFreezeDiag=0,lastBarrierRpcDiag=0,lastCountLine=0;
+uint64_t lastCountTotal=0;
+
+// Console output is best-effort and never waits for an attached terminal. No
+// secret, SSID, device ID, production-order UUID or request body is printed.
+void status(const char* message) {
+  (void)bestEffortLine(Serial,message);
+}
+bool validCa(const char* pem) {
+  mbedtls_x509_crt cert;mbedtls_x509_crt_init(&cert);
+  const int result=mbedtls_x509_crt_parse(&cert,reinterpret_cast<const unsigned char*>(pem),strlen(pem)+1);
+  mbedtls_x509_crt_free(&cert);return result==0;
+}
+void networkTask(void*) {
+  while(!stopNetwork.load(std::memory_order_acquire)) {
+    networkProgress.store(millis(),std::memory_order_relaxed);
+    network->step();
+    wifiPsDisabled.store(networkStation->powerSaveDiagnostic(),std::memory_order_relaxed);
+    wifiPsSet.store(networkStation->powerSaveSetResult(),std::memory_order_relaxed);
+    networkProgress.store(millis(),std::memory_order_relaxed);
+    // Updates are informational only; they cannot prove a live freeze lease.
+    const bool online=networkWifi->state()==WifiSupervisor::State::Online;
+    radioOnline.store(online,std::memory_order_relaxed);
+    timeTrusted.store(online && networkTime->trusted(),std::memory_order_relaxed);
+    timeBudget.store(networkTime->lastBudget(),std::memory_order_relaxed);
+    timeStage.store(networkTime->lastStage(),std::memory_order_relaxed);
+    timeResult.store(networkTime->lastResult(),std::memory_order_relaxed);
+    timeDetail.store(networkTime->lastDetail(),std::memory_order_relaxed);
+    timeStart.store(networkTime->lastHandshakeStartMs(),std::memory_order_relaxed);
+    timeTx.store(networkTime->lastTxBytes(),std::memory_order_relaxed);
+    timeRx.store(networkTime->lastRxBytes(),std::memory_order_relaxed);
+    rpcKind.store(static_cast<int>(networkWorker->lastKind()),std::memory_order_relaxed);
+    rpcResult.store(static_cast<int>(networkWorker->lastOutcome().result),std::memory_order_relaxed);
+    rpcStage.store(static_cast<int>(networkExchange->lastStage()),std::memory_order_relaxed);
+    rpcNet.store(static_cast<int>(networkExchange->lastStatus()),std::memory_order_relaxed);
+    rpcHttp.store(networkExchange->lastHttpStatus(),std::memory_order_relaxed);
+    rpcReuse.store(networkExchange->lastReused()?1:0,std::memory_order_relaxed);
+    if(static_cast<int>(networkWorker->lastKind())>=static_cast<int>(SyncPlanner::Kind::Freeze)) {
+      barrierRpcKind.store(static_cast<int>(networkWorker->lastKind()),std::memory_order_relaxed);
+      barrierRpcResult.store(static_cast<int>(networkWorker->lastOutcome().result),std::memory_order_relaxed);
+      barrierRpcStage.store(static_cast<int>(networkExchange->lastStage()),std::memory_order_relaxed);
+      barrierRpcNet.store(static_cast<int>(networkExchange->lastStatus()),std::memory_order_relaxed);
+      barrierRpcHttp.store(networkExchange->lastHttpStatus(),std::memory_order_relaxed);
+      barrierRpcReuse.store(networkExchange->lastReused()?1:0,std::memory_order_relaxed);
+    }
+    vTaskDelay(1);
+  }
+  networkWorker->closeConnection();
+  vTaskDelete(nullptr);
+}
+// Software supervisor on an independent FreeRTOS task. It does not assume a
+// lost connection or a 4.5/11/8s timeout is a hung task. It cannot recover a
+// scheduler-wide halt, failed power, or an unavailable external service.
+void watchdogTask(void*) {
+  ProgressWatchdog policy;
+  for(;;) {
+    const bool active=watchdogEnabled.load(std::memory_order_acquire) && !stopNetwork.load(std::memory_order_acquire);
+    // Load progress before reading the clock: a newer concurrent heartbeat
+    // must not appear as a huge unsigned elapsed time.
+    const uint32_t count=countProgress.load(std::memory_order_relaxed);
+    const uint32_t net=networkProgress.load(std::memory_order_relaxed);
+    const uint32_t now=millis();
+    const bool healthy=active && static_cast<uint32_t>(now-count)<5000 && static_cast<uint32_t>(now-net)<30000;
+    watchdogBudget.observe(now,healthy);
+    watchdogAttempts.store(watchdogBudget.attempts(),std::memory_order_relaxed);
+    const bool available=watchdogBudget.available();
+    watchdogHold.store(active && !available,std::memory_order_relaxed);
+    const bool pressed=digitalRead(BUTTON_PIN)==LOW;
+    if(policy.step(now,count,net,active,pressed,available)==ProgressWatchdog::Action::Restart) {
+      const uint32_t latestCount=countProgress.load(std::memory_order_relaxed);
+      const uint32_t latestNet=networkProgress.load(std::memory_order_relaxed);
+      const uint32_t checkNow=millis();
+      const bool stillStalled=static_cast<uint32_t>(checkNow-latestCount)>=ProgressWatchdog::STALL_MS ||
+                              static_cast<uint32_t>(checkNow-latestNet)>=ProgressWatchdog::STALL_MS;
+      if(stillStalled && !stopNetwork.load(std::memory_order_acquire) && digitalRead(BUTTON_PIN)!=LOW && watchdogBudget.reserve()) {
+        watchdogResetMarker.markAttempt();
+        esp_restart(); // retained counter and freeze journal are never erased
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(500));
+  }
+}
+const char* statusName(DeviceInput::Status s) {
+  switch(s) {
+    case DeviceInput::Status::Ready:return "STATUS: ready; counts may be pending";
+    case DeviceInput::Status::Unbound:return "STATUS: unbound; presses rejected";
+    case DeviceInput::Status::ReleaseRequired:return "STATUS: release button before counting";
+    case DeviceInput::Status::StorageError:return "FAULT: NVS error; do not erase";
+    case DeviceInput::Status::CapacityFull:return "FAULT: counter full; stopped";
+    case DeviceInput::Status::Fault:return "FAULT: sync stopped; do not erase NVS";
+  }
+  return "FAULT: unknown input state";
+}
+}
+void setup() {
+  // Consume once even when configuration or NVS initialization fails.
+  previousWatchdogAttempt=watchdogResetMarker.consume(esp_reset_reason()==ESP_RST_SW);
+  Serial.begin(115200);
+#if ARDUINO_USB_CDC_ON_BOOT
+  // HWCDC's default TX mutex timeout is 100ms. Diagnostics must never hold
+  // the GPIO/counting task while the host is disconnected or congested.
+  Serial.setTxTimeoutMs(0);
+#endif
+  pinMode(BUTTON_PIN,INPUT_PULLUP);
+  if(!config.valid() || !validCa(config.ca)) {startupFault="FAULT: check local config or CA";status(startupFault);return;}
+  if(!storage.begin() || counter.load()!=DurableCounter::Result::Ok) {startupFault="FAULT: NVS load failed; do not erase";status(startupFault);return;}
+  static FreeRtosRadioLifecycleLock lock;
+  static FreeRtosSyncMailbox mailbox;
+  if(!lock.valid() || !mailbox.valid()) {startupFault="FAULT: task primitives unavailable";status(startupFault);return;}
+  static EspWifiEntropy hardwareEntropy;
+  static GuardedEntropy countEntropy(lock,hardwareEntropy), networkEntropy(lock,hardwareEntropy);
+  static RandomEpochSource epochs(countEntropy);
+  static SyncPlanner planner(counter,epochs,true);
+  static SyncController countController(planner,mailbox);
+  static DeviceInput button(counter,planner,digitalRead(BUTTON_PIN)==LOW,millis());
+  static Clock clock;static Yield scheduler;static EspMonotonicMillis monotonic;
+  static EspWifiStation station;static WifiSupervisor supervisor(station,config.ssid,config.password);
+  static GuardedWifiSupervisor wifi(lock,supervisor);
+  static EspAsyncDnsBackend dnsBackend;static AsyncDns dns(dnsBackend);
+  static EspTcpOps ops;static NonblockingTcp tcp(ops);static ResolvedTcpConnect resolved(dns,tcp);
+  static MbedTlsSession tls(tcp);static VerifiedConnect verified(clock,tcp,resolved,tls);
+  static TrustedTimeWindow window(monotonic,config.timeLifetimeMs,config.clockDriftPpm);
+  static MbedTlsChannel channel(clock,scheduler,window,verified,tls,config.ca);
+  static HttpRpcExchange exchange(channel,config.host,config.key,NETWORK_TIMEOUT_MS,DATA_RPC_TIMEOUT_MS,true,&pollYield);
+  static SerialRpcMonitor monitor(exchange);rpcMonitor=&monitor;
+  static SyncNetworkWorker worker(mailbox,exchange,config.secret,&monitor);
+  static TimeProof proof(networkEntropy);static TimeBootstrapExchange bootstrap(clock,scheduler,tcp,resolved,proof);
+  static TimeWindowSynchronizer sync(monotonic,window,bootstrap);
+  static AuthenticatedNetworkTime time(window,sync,config.host,config.key,config.ca,config.deviceId,config.secret,TIME_BOOTSTRAP_TIMEOUT_MS,TIME_RECOVERY_TIMEOUT_MS);
+  static NetworkTaskCoordinator coordinator(clock,wifi,time,worker);
+  controller=&countController;countPlanner=&planner;input=&button;network=&coordinator;networkWifi=&wifi;networkStation=&station;networkTime=&time;networkWorker=&worker;networkExchange=&exchange;
+  if(controller->faulted()) {startupFault="FAULT: initial state invalid";status(startupFault);return;}
+  watchdogBudget.begin(esp_reset_reason()==ESP_RST_SW);
+  TaskHandle_t guardHandle=nullptr;
+  if(xTaskCreate(watchdogTask,"xingyi-watch",WATCHDOG_STACK_BYTES,nullptr,2,&guardHandle)!=pdPASS || !guardHandle) {
+    startupFault="FAULT: watchdog task unavailable";status(startupFault);return;
+  }
+  TaskHandle_t handle=nullptr;
+  if(xTaskCreatePinnedToCore(networkTask,"xingyi-net",NETWORK_STACK_BYTES,nullptr,1,&handle,0)!=pdPASS || !handle) {
+    startupFault="FAULT: network task unavailable";status(startupFault);return;
+  }
+  initialized=true;lastCountTotal=counter.state().total;
+  countProgress.store(millis(),std::memory_order_relaxed);
+  networkProgress.store(millis(),std::memory_order_relaxed);
+  watchdogEnabled.store(true,std::memory_order_release);
+  status("Test candidate started; do not use in production");
+}
+void loop() {
+#if ARDUINO_USB_CDC_ON_BOOT && CONFIG_IDF_TARGET_ESP32S3
+  // Arduino 2.0.17 HWCDC can leave pending TX with the IN_EMPTY interrupt
+  // disabled. Re-kick its normal ISR when disconnected or buffer-starved;
+  // never clear queues, touch NVS, reset USB, or write to a full TX ring.
+  // Rate limit even while monitor->drain() is retrying every loop.
+  static UsbSerialRecovery usbRecovery;
+  if(usbRecovery.due(millis())) {
+    // Same zero-timeout HWCDC mutex as normal logging.
+    const bool plugged=HWCDC::isPlugged();
+    const bool ready=plugged && static_cast<bool>(Serial);
+    const int space=ready?Serial.availableForWrite():0;
+    if(UsbSerialRecovery::shouldKick(plugged,ready,space)) {
+      usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+      usb_serial_jtag_ll_txfifo_flush();
+    }
+  }
+#endif
+  if(!initialized){const uint32_t now=millis();if(now-lastStatus>=5000){lastStatus=now;status(startupFault);}delay(100);return;}
+  const uint32_t now=millis();
+  const auto sample=input->tick(digitalRead(BUTTON_PIN)==LOW,now);
+  if(sample.accepted)pollYield.accepted();
+  controller->step(now);
+  if(controller->faulted() || sample.status==DeviceInput::Status::StorageError || sample.status==DeviceInput::Status::CapacityFull || sample.status==DeviceInput::Status::Fault)
+    stopNetwork.store(true,std::memory_order_release);
+  const bool changed=sample.status!=priorStatus;
+  if(changed) {
+    priorStatus=sample.status;lastStatus=now;
+    status(controller->faulted()?"FAULT: sync stopped; do not erase NVS":statusName(sample.status));
+  } else if(now-lastStatus>=STATUS_INTERVAL_MS) {
+    lastStatus=now;
+    if(watchdogHold.load(std::memory_order_relaxed))status("WATCHDOG: restart limit reached");
+    if(controller->faulted()) {
+      char info[64];snprintf(info,sizeof(info),"FAULT_DIAG planner=%d controller=%d",static_cast<int>(countPlanner->faultReason()),controller->diagnosticFault());status(info);
+      status("FAULT: sync stopped; do not erase NVS");
+    }
+    else {
+      char info[64];
+      snprintf(info,sizeof(info),"WIFI=%d TIME=%d BOUND=%d PENDING=%llu t=%lu",radioOnline.load()?1:0,timeTrusted.load()?1:0,counter.isReady()?1:0,static_cast<unsigned long long>(counter.pending()),static_cast<unsigned long>(now));
+      status(info);
+    }
+  }
+  // Print at most one diagnostic line per loop; never blocks the button task.
+  rpcMonitor->drain();
+  static uint32_t lastMonitorNotice=0;
+  if(now-lastMonitorNotice>=15000) {
+    char info[64];snprintf(info,sizeof(info),"MON v=1 t=%lu lost=%lu",static_cast<unsigned long>(now),static_cast<unsigned long>(rpcMonitor->lost()));
+    status(info);lastMonitorNotice=now;
+  }
+  // Separate from the status and MON lines so a small TX buffer can drain.
+  // This is a best-effort snapshot, not proof of a reset cause.
+  static uint32_t lastWatchdogDiag=0;
+  if(now-lastWatchdogDiag>=15000 && now-lastStatus>=300 && now-lastStatus<400) {
+    char wd[96];snprintf(wd,sizeof(wd),"WDT_DIAG reset=%d attempts=%lu hold=%d prior=%d",static_cast<int>(esp_reset_reason()),static_cast<unsigned long>(watchdogAttempts.load(std::memory_order_relaxed)),watchdogHold.load(std::memory_order_relaxed)?1:0,previousWatchdogAttempt?1:0);
+    status(wd);lastWatchdogDiag=now;
+  }
+  static uint32_t lastWifiDiag=0;
+  if(now-lastWifiDiag>=15000 && now-lastStatus>=700 && now-lastStatus<800) {
+    char info[64];snprintf(info,sizeof(info),"WIFI_DIAG ps_off=%d set=%d",wifiPsDisabled.load(std::memory_order_relaxed),wifiPsSet.load(std::memory_order_relaxed));
+    status(info);lastWifiDiag=now;
+  }
+  // A local counter update is informative only: it is NOT the server draft.
+  // Rate-limit to protect the GPIO/NVS task; output may be dropped when full.
+  if(!controller->faulted() && counter.isReady() && counter.state().total!=lastCountTotal && now-lastCountLine>=200) {
+    char info[64];snprintf(info,sizeof(info),"COUNT t=%lu total=%llu p=%llu",static_cast<unsigned long>(now),static_cast<unsigned long long>(counter.state().total),static_cast<unsigned long long>(counter.pending()));
+    status(info);lastCountLine=now;lastCountTotal=counter.state().total;
+  }
+  // Emit only numeric failure stage/result/detail, never credentials or data.
+  // Offset from the main status line so a small serial buffer can drain.
+  if(radioOnline.load() && !timeTrusted.load() && now-lastDiagnostic>=5000 && now-lastStatus>=400 && now-lastStatus<600) {
+    lastDiagnostic=now;char diag[64];
+    snprintf(diag,sizeof(diag),"TIME_DIAG stage=%d result=%d code=%d budget=%lu",timeStage.load(),timeResult.load(),timeDetail.load(),static_cast<unsigned long>(timeBudget.load()));
+    status(diag);
+  }
+  if(radioOnline.load() && !timeTrusted.load() && now-lastTlsIo>=5000 && now-lastStatus>=700 && now-lastStatus<900) {
+    lastTlsIo=now;char info[64];
+    snprintf(info,sizeof(info),"TLS_IO start=%lu tx=%lu rx=%lu",static_cast<unsigned long>(timeStart.load()),static_cast<unsigned long>(timeTx.load()),static_cast<unsigned long>(timeRx.load()));
+    status(info);
+  }
+  if(radioOnline.load() && now-lastRpcDiag>=5000 && now-lastStatus>=150 && now-lastStatus<300) {
+    lastRpcDiag=now;char info[64];
+    snprintf(info,sizeof(info),"RPC_DIAG k=%d r=%d s=%d n=%d h=%d u=%d",rpcKind.load(),rpcResult.load(),rpcStage.load(),rpcNet.load(),rpcHttp.load(),rpcReuse.load());
+    status(info);
+  }
+  if(radioOnline.load() && now-lastFreezeDiag>=5000 && now-lastStatus>=570 && now-lastStatus<670) {
+    lastFreezeDiag=now;char info[64];
+    snprintf(info,sizeof(info),"FREEZE b=%d f=%d c=%d i=%d",static_cast<int>(countPlanner->diagnosticBarrier()),counter.isFrozen()?1:0,counter.canReportFrozen()?1:0,static_cast<int>(countPlanner->diagnosticInFlight()));
+    status(info);
+  }
+  if(radioOnline.load() && barrierRpcKind.load()!=0 && now-lastBarrierRpcDiag>=5000 && now-lastStatus>=850 && now-lastStatus<950) {
+    lastBarrierRpcDiag=now;char info[64];
+    snprintf(info,sizeof(info),"BAR_RPC k=%d r=%d s=%d n=%d h=%d u=%d",barrierRpcKind.load(),barrierRpcResult.load(),barrierRpcStage.load(),barrierRpcNet.load(),barrierRpcHttp.load(),barrierRpcReuse.load());
+    status(info);
+  }
+  countProgress.store(millis(),std::memory_order_relaxed);
+  delay(1);
+}

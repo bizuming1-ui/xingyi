@@ -1,0 +1,49 @@
+name: Isolated Supabase endpoint probe
+on:
+  pull_request:
+    paths: ['.github/workflows/supabase-test-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  endpoint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify test endpoint TLS and inspect public response headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          host=xypisxdlxcqyavixdiji.supabase.co
+          openssl s_client -connect "$host:443" -servername "$host" -verify_hostname "$host" -verify_return_error -showcerts </dev/null > "$RUNNER_TEMP/chain.txt" 2> "$RUNNER_TEMP/verify.txt"
+          cat "$RUNNER_TEMP/verify.txt"
+          awk '/-----BEGIN CERTIFICATE-----/{n++;p=1} p{print > ("'"$RUNNER_TEMP"'/cert-" n ".pem")} /-----END CERTIFICATE-----/{p=0}' "$RUNNER_TEMP/chain.txt"
+          for cert in "$RUNNER_TEMP"/cert-*.pem; do openssl x509 -in "$cert" -noout -subject -issuer -dates -fingerprint -sha256; done
+          verified=$(openssl verify -show_chain -verify_hostname "$host" -CAfile /etc/ssl/certs/ca-certificates.crt -untrusted "$RUNNER_TEMP/chain.txt" "$RUNNER_TEMP/cert-1.pem")
+          echo "$verified"
+          echo "::notice title=Verified chain::${verified//$'\n'/' | '}"
+          root_subject=$(printf '%s\n' "$verified" | grep 'depth=' | tail -1 | sed 's/^.*depth=[0-9]*: //')
+          root=''
+          for cert in /etc/ssl/certs/*.pem; do
+            subject=$(openssl x509 -in "$cert" -noout -subject 2>/dev/null | sed 's/^subject=//' || true)
+            if [[ "$subject" == "$root_subject" ]]; then root="$cert"; break; fi
+          done
+          test -n "$root" || { echo "::error::Could not identify trusted root: $root_subject"; exit 1; }
+          echo "::notice title=Trusted root identity::$(openssl x509 -in "$root" -noout -subject -fingerprint -sha256 | tr '\n' ' ')"
+          echo "::notice title=Trusted root PEM base64::$(base64 -w0 "$root")"
+          curl --http1.1 --silent --show-error --max-time 15 --dump-header "$RUNNER_TEMP/headers.txt" --output /dev/null \
+            -H 'apikey: sb_publishable_Wn_srpPJ3lIYOMWwDASRyQ_mqp37Pnc' -H 'Content-Type: application/json' \
+            --data '{"p_device":"00000000-0000-4000-8000-000000000001","p_nonce":"0000000000000000000000000000000000000000000000000000000000000000"}' \
+            "https://$host/rest/v1/rpc/device_time_proof"
+          echo "::notice title=Endpoint response headers::$(grep -Ei '^(HTTP/|content-length:|transfer-encoding:|content-type:)' "$RUNNER_TEMP/headers.txt" | tr '\r\n' ' ')"
+      - name: Measure unauthenticated HTTP/1.1 connection reuse (diagnostic only)
+        shell: bash
+        run: |
+          set -euo pipefail
+          url=https://xypisxdlxcqyavixdiji.supabase.co/rest/v1/
+          # No device credentials or user data. num_connects=0 for the second
+          # request indicates the curl client reused its first TLS connection.
+          result=$(curl --http1.1 --silent --show-error --max-time 20 \
+            --write-out 'status=%{http_code} new_connections=%{num_connects} total=%{time_total}\n' \
+            --output /dev/null "$url" --output /dev/null "$url")
+          echo "$result"
+          echo "::notice title=HTTP reuse probe::${result//$'\n'/' | '}"

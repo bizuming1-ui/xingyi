@@ -1,0 +1,13 @@
+{
+  "name": "xingyi-device-database-tests",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node db-check.mjs && node setup-check.mjs && node vault-check.mjs && node rotation-check.mjs && node replace-count-check.mjs",
+    "firmware-test": "node firmware-integration.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.13"
+  }
+}

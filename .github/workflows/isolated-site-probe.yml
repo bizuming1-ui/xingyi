@@ -1,0 +1,42 @@
+name: Isolated public test pages
+on:
+  workflow_dispatch:
+  push:
+    branches: [arena/2de2baa1-xingyi]
+    paths:
+      - .github/workflows/isolated-site-probe.yml
+      - tests/e2e/device-vault.mjs
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check public HTML is reachable
+        shell: bash
+        run: |
+          set -eu
+          base=https://bizuming1-ui.github.io/xingyi-isolated-test
+          curl -fSsL --max-time 30 "$base/" -o /tmp/demo1.html
+          curl -fSsL --max-time 30 "$base/device/" -o /tmp/demo2.html
+      - uses: actions/checkout@v4
+      - name: Verify deployed files match this commit
+        run: |
+          cmp /tmp/demo1.html public-demo/index.html
+          cmp /tmp/demo2.html public-device/index.html
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci && npm ci --prefix tests/e2e
+      - name: Browser-check public HTML, mobile QR and candidate ZIP
+        run: |
+          for script in public-pages-demo.mjs public-device-live.mjs device-vault.mjs device-provision-vault.mjs; do
+            if ! PUBLIC_EDGE_LIVE=1 PUBLIC_PAGES_LIVE=1 node "tests/e2e/$script" > /tmp/browser-log 2>&1; then
+              cat /tmp/browser-log
+              message=$(tail -25 /tmp/browser-log | tr '\n' ' ' | cut -c1-1800)
+              echo "::error::$script failed: $message"
+              exit 1
+            fi
+            cat /tmp/browser-log
+          done

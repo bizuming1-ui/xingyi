@@ -1,0 +1,43 @@
+name: TLS session tests
+on:
+  pull_request:
+    paths: ['firmware/**', 'tests/mbedtls_session.cpp', 'tests/verified_connect.cpp', 'tests/mbedtls_http.cpp', 'tests/mbedtls_keepalive.cpp', 'tests/mbedtls_poll_interrupt.cpp', 'tests/mbedtls_poll_presend.cpp', 'tests/time_proof_driver.cpp', 'tests/time_bootstrap.cpp', 'tests/firmware_https_database_driver.cpp', 'tests/database/firmware-https-integration.mjs', 'tests/database/time-proof.mjs', 'tests/database/package*.json', 'supabase/migrations/**', 'supabase/schema.sql', 'tests/run-mbedtls-tests.py', 'tests/mocks/lwip/**', '.github/workflows/mbedtls-tests.yml']
+permissions:
+  contents: read
+jobs:
+  verified-local-tls:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch and verify mbedTLS source
+        run: |
+          curl -fsSL https://codeload.github.com/Mbed-TLS/mbedtls/tar.gz/refs/tags/v2.28.10 -o "$RUNNER_TEMP/mbedtls.tar.gz"
+          echo '0f2e0525903a89ae1d39ce439d858be66933bda54c5b6102b72a29ed8fe7c088  '"$RUNNER_TEMP/mbedtls.tar.gz" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/mbedtls"
+          tar xzf "$RUNNER_TEMP/mbedtls.tar.gz" -C "$RUNNER_TEMP/mbedtls" --strip-components=1
+          make -C "$RUNNER_TEMP/mbedtls/library" -j2
+      - name: Fetch and verify ArduinoJson source
+        run: |
+          curl -fsSL https://codeload.github.com/bblanchon/ArduinoJson/tar.gz/refs/tags/v6.21.5 -o "$RUNNER_TEMP/arduinojson.tar.gz"
+          echo '27cd4891596fa1a70e35851231958ea2b0719a37d0af110e9e085eb5500be0c3  '"$RUNNER_TEMP/arduinojson.tar.gz" | sha256sum -c -
+          tar xzf "$RUNNER_TEMP/arduinojson.tar.gz" -C "$RUNNER_TEMP"
+      - name: Exercise verified TLS against local server
+        run: MBEDTLS_DIR="$RUNNER_TEMP/mbedtls" ARDUINOJSON_INCLUDE="$RUNNER_TEMP/ArduinoJson-6.21.5/src" python3 tests/run-mbedtls-tests.py
+      - name: Exercise SDK configuration without built-in date verification
+        run: |
+          mkdir "$RUNNER_TEMP/mbedtls-no-date"
+          tar xzf "$RUNNER_TEMP/mbedtls.tar.gz" -C "$RUNNER_TEMP/mbedtls-no-date" --strip-components=1
+          sed -i 's/^#define MBEDTLS_HAVE_TIME_DATE$/\/\/ #define MBEDTLS_HAVE_TIME_DATE/' "$RUNNER_TEMP/mbedtls-no-date/include/mbedtls/config.h"
+          make -C "$RUNNER_TEMP/mbedtls-no-date/library" -j2
+          MBEDTLS_DIR="$RUNNER_TEMP/mbedtls-no-date" ARDUINOJSON_INCLUDE="$RUNNER_TEMP/ArduinoJson-6.21.5/src" python3 tests/run-mbedtls-tests.py
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Test isolated database and firmware time proof
+        run: |
+          npm ci --prefix tests/database
+          MBEDTLS_DIR="$RUNNER_TEMP/mbedtls-no-date" node tests/database/time-proof.mjs
+      - name: Test firmware over local HTTPS and isolated database
+        run: |
+          MBEDTLS_DIR="$RUNNER_TEMP/mbedtls-no-date" ARDUINOJSON_INCLUDE="$RUNNER_TEMP/ArduinoJson-6.21.5/src" node tests/database/firmware-https-integration.mjs

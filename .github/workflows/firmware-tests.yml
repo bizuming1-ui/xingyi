@@ -1,0 +1,14 @@
+name: Firmware component tests
+on:
+  pull_request:
+    paths: ['firmware/**', 'tests/**', '.github/workflows/firmware-tests.yml']
+  push:
+    paths: ['firmware/**', 'tests/**', '.github/workflows/firmware-tests.yml']
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./tests/run-firmware-tests.sh

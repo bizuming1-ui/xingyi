@@ -1,0 +1,38 @@
+name: Device RPC codec tests
+on:
+  pull_request:
+    paths: ['firmware/**', 'tests/rpc_codec.cpp', 'tests/rpc_worker.cpp', 'tests/sync_bridge.cpp', 'tests/network_task_coordinator.cpp', 'tests/free_rtos_mailbox.cpp', 'tests/http_response_decoder.cpp', 'tests/http_rpc_exchange.cpp', 'tests/firmware_database_driver.cpp', 'tests/database/**', 'tests/mocks/freertos/**', 'tests/run-rpc-tests.sh', '.github/workflows/rpc-codec-tests.yml']
+permissions:
+  contents: read
+jobs:
+  codec:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Download pinned ArduinoJson source
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error https://codeload.github.com/bblanchon/ArduinoJson/tar.gz/refs/tags/v6.21.5 -o "$RUNNER_TEMP/arduinojson.tar.gz"
+          echo "27cd4891596fa1a70e35851231958ea2b0719a37d0af110e9e085eb5500be0c3  $RUNNER_TEMP/arduinojson.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/arduinojson.tar.gz" -C "$RUNNER_TEMP"
+      - name: Run codec tests
+        run: ./tests/run-rpc-tests.sh
+        env:
+          ARDUINOJSON_INCLUDE: ${{ runner.temp }}/ArduinoJson-6.21.5/src
+      - name: Install isolated database test dependencies
+        run: npm ci --prefix tests/database
+      - name: Run firmware/database integration
+        run: npm run firmware-test --prefix tests/database
+        env:
+          ARDUINOJSON_INCLUDE: ${{ runner.temp }}/ArduinoJson-6.21.5/src
+      - name: Check HTTP framing with sanitizers
+        run: |
+          g++ -std=c++11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer tests/http_response_decoder.cpp -o "$RUNNER_TEMP/http-decoder-test"
+          "$RUNNER_TEMP/http-decoder-test"
+      - name: Check HTTP exchange with sanitizers
+        run: |
+          g++ -std=c++11 -Wall -Wextra -Werror -fsanitize=address,undefined -fno-omit-frame-pointer -I "$RUNNER_TEMP/ArduinoJson-6.21.5/src" tests/http_rpc_exchange.cpp -o "$RUNNER_TEMP/http-rpc-test"
+          "$RUNNER_TEMP/http-rpc-test"
