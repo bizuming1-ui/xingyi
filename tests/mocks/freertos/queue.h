@@ -15,3 +15,7 @@ inline BaseType_t xQueueReceive(QueueHandle_t q,void* item,unsigned wait) {
   if(!q || !item || wait || !q->full)return pdFALSE;
   std::memcpy(item,q->storage,q->itemSize);q->full=false;return pdTRUE;
 }
+inline BaseType_t xQueuePeek(QueueHandle_t q,void* item,unsigned wait) {
+  if(!q || !item || wait || !q->full)return pdFALSE;
+  std::memcpy(item,q->storage,q->itemSize);return pdTRUE;
+}

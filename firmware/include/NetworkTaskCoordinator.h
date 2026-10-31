@@ -36,10 +36,10 @@ class NetworkTaskCoordinator {
     const uint32_t now=clock_.nowMillis();
     if(!wifi_.step(now)){worker_.flushPending();return;}
     if(wifi_.state()!=WifiSupervisor::State::Online) {
-      worker_.closeConnection();time_.invalidate();attempted_=false;worker_.failUnavailable();return;
+      worker_.closeConnection();time_.invalidate();attempted_=false;deferred_=false;worker_.failUnavailable();return;
     }
     if(!time_.trusted()) {
-      worker_.closeConnection(); // bootstrap shares the same TCP/TLS resources
+      deferred_=false;worker_.closeConnection(); // bootstrap shares the same TCP/TLS resources
       if(!attempted_ || static_cast<uint32_t>(now-lastAttempt_)>=TIME_RETRY_MS) {
         (void)time_.refresh();
         // Backoff is measured from completion, including timeout duration.
@@ -52,7 +52,12 @@ class NetworkTaskCoordinator {
     // bootstrap on the shared TCP transport. Hard expiry still fails closed.
     if(time_.trusted() && time_.refreshDue() && !worker_.barrierActive() &&
        (!attempted_ || static_cast<uint32_t>(now-lastAttempt_)>=TIME_RETRY_MS)) {
-      worker_.closeConnection();(void)time_.refreshPreserving();
+      // Serve at most one already-queued non-poll command before this refresh.
+      // This cannot extend trust, and does not defer hard-expiry recovery.
+      if(!deferred_ && worker_.hasPriorityCommand()) {
+        deferred_=true;worker_.step();return;
+      }
+      deferred_=false;worker_.closeConnection();(void)time_.refreshPreserving();
       attempted_=true;lastAttempt_=clock_.nowMillis();
       if(!time_.trusted()){worker_.failUnavailable();return;}
     }
@@ -60,5 +65,5 @@ class NetworkTaskCoordinator {
   }
  private:
   NetworkTaskClock& clock_;GuardedWifiSupervisor& wifi_;NetworkTimeService& time_;SyncNetworkWorker& worker_;
-  bool attempted_=false;uint32_t lastAttempt_=0;
+  bool attempted_=false,deferred_=false;uint32_t lastAttempt_=0;
 };

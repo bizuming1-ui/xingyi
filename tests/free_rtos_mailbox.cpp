@@ -7,9 +7,10 @@ int main() {
   FreeRtosSyncMailbox box;assert(box.valid());
   SyncPlanner::Command command{};command.kind=SyncPlanner::Kind::Upload;command.ticket=42;command.total=97;
   assert(box.submit(command));assert(!box.submit(command));
-  SyncPlanner::Command received{};assert(box.take(received));
+  SyncPlanner::Command received{};assert(box.peek(received));assert(received.ticket==42);
+  assert(box.peek(received));assert(box.take(received));
   assert(received.kind==command.kind && received.ticket==42 && received.total==97);
-  assert(!box.take(received));
+  assert(!box.peek(received));assert(!box.take(received));
   SyncMailbox::Completion result{};result.ticket=42;result.reply.success=true;result.reply.acceptedTotal=97;
   assert(box.publish(result));assert(!box.publish(result));
   SyncMailbox::Completion collected{};assert(box.collect(collected));

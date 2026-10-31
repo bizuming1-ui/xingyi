@@ -11,6 +11,8 @@ class SyncMailbox {
   virtual bool submit(const SyncPlanner::Command& command)=0;
   virtual bool collect(Completion& completion)=0;
   virtual bool take(SyncPlanner::Command& command)=0;
+  // Optional non-destructive observation by the network thread.
+  virtual bool peek(SyncPlanner::Command& command) { (void)command; return false; }
   virtual bool publish(const Completion& completion)=0;
 };
 
@@ -61,6 +63,11 @@ class SyncNetworkWorker {
   SyncPlanner::Kind lastKind() const {return lastKind_;}
   RpcWorker::Outcome lastOutcome() const {return lastOutcome_;}
   bool barrierActive() const {return barrierActive_;}
+  bool hasPriorityCommand() {
+    if(pending_)return false;
+    SyncPlanner::Command command{};
+    return mailbox_.peek(command) && command.kind!=SyncPlanner::Kind::None && command.kind!=SyncPlanner::Kind::Poll;
+  }
   void closeConnection() {exchange_.close();}
   // Flush an already executed result without issuing or discarding an RPC.
   void flushPending() { if (pending_) publish(); }

@@ -20,6 +20,7 @@ class FreeRtosSyncMailbox final : public SyncMailbox {
   bool valid() const { return commands_ && completions_; }
   bool submit(const SyncPlanner::Command& item) override { return commands_ && xQueueSend(commands_,&item,0)==pdTRUE; }
   bool collect(Completion& item) override { return completions_ && xQueueReceive(completions_,&item,0)==pdTRUE; }
+  bool peek(SyncPlanner::Command& item) override { return commands_ && xQueuePeek(commands_,&item,0)==pdTRUE; }
   bool take(SyncPlanner::Command& item) override { return commands_ && xQueueReceive(commands_,&item,0)==pdTRUE; }
   bool publish(const Completion& item) override { return completions_ && xQueueSend(completions_,&item,0)==pdTRUE; }
  private:

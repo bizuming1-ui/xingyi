@@ -14,6 +14,7 @@ struct Epochs : EpochSource {bool generate(char out[37]) override {memcpy(out,"1
 struct Mailbox : SyncMailbox {
  SyncPlanner::Command command{};Completion result{};bool hasCommand=false,hasResult=false,blockPublish=false;
  bool submit(const SyncPlanner::Command& v) override{if(hasCommand)return false;command=v;hasCommand=true;return true;}
+ bool peek(SyncPlanner::Command& v) override{if(!hasCommand)return false;v=command;return true;}
  bool take(SyncPlanner::Command& v) override{if(!hasCommand)return false;v=command;hasCommand=false;return true;}
  bool collect(Completion& v) override{if(!hasResult)return false;v=result;hasResult=false;return true;}
  bool publish(const Completion& v) override{if(hasResult||blockPublish)return false;result=v;hasResult=true;return true;}
@@ -92,5 +93,23 @@ int main(){
  clock3.now=11000;proactive.step();assert(time3.preserves==2 && time3.trusted());
  // Loss of trust must bootstrap even when a barrier is being resolved.
  time3.valid=false;clock3.now=16000;proactive.step();assert(time3.refreshes==1);
+ // Already queued upload gets one opportunity before proactive refresh,
+ // but a continuous stream cannot indefinitely defer time proof.
+ Lock lock4;Station station4;station4.online=true;WifiSupervisor supervisor4(station4,"network","password");
+ GuardedWifiSupervisor wifi4(lock4,supervisor4);Clock clock4;Time time4;Mailbox mailbox4;Exchange exchange4;
+ SyncNetworkWorker worker4(mailbox4,exchange4,"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+ NetworkTaskCoordinator priority(clock4,wifi4,time4,worker4);
+ priority.step();time4.valid=true;time4.due=true;
+ SyncPlanner::Command upload{};upload.kind=SyncPlanner::Kind::Upload;upload.ticket=1;
+ memcpy(upload.binding,"20000000-0000-4000-8000-000000000001",37);
+ memcpy(upload.epoch,"10000000-0000-4000-8000-000000000001",37);upload.total=7;
+ assert(mailbox4.submit(upload));clock4.now=1;priority.step();
+ assert(exchange4.calls==1 && time4.preserves==0 && mailbox4.hasResult);
+ SyncMailbox::Completion done{};assert(mailbox4.collect(done));assert(mailbox4.submit(upload));
+ clock4.now=2;priority.step();assert(time4.preserves==1 && exchange4.calls==2);
+ // Hard expiry overrides a deferred upload; it never sends without trust.
+ time4.valid=false;time4.success=false;assert(mailbox4.collect(done));assert(mailbox4.submit(upload));
+ clock4.now=5002;priority.step();assert(time4.refreshes==1 && exchange4.calls==2);
+ assert(mailbox4.hasResult && !mailbox4.result.reply.success);
  std::cout<<"network task coordination and offline count tests passed\n";
 }
