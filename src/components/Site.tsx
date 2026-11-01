@@ -1,35 +1,15 @@
 import { useEffect, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
-
-interface Data {
-  order: string; // 生产单
-  product: string; // 产品
-  total: string; // 生产总数
-  current: number; // 当前生产数（只读，只能通过“确认”增加）
-  now: string; // 现在
-}
-
-const KEY = "production-board-v1";
-const EMPTY: Data = { order: "", product: "", total: "", current: 0, now: "" };
-
-function load(): Data {
-  try {
-    const raw = localStorage.getItem(KEY);
-    if (!raw) return EMPTY;
-    const d = JSON.parse(raw);
-    return {
-      order: String(d.order ?? ""),
-      product: String(d.product ?? ""),
-      total: String(d.total ?? ""),
-      current: Number(d.current) || 0,
-      now: String(d.now ?? ""),
-    };
-  } catch {
-    return EMPTY;
-  }
-}
-
-const digits = (v: string) => v.replace(/\D/g, "").slice(0, 9);
+import {
+  STORAGE_KEY,
+  addToNow,
+  applyDevicePress,
+  digits,
+  loadBoard,
+  saveBoard,
+  type BoardData,
+} from "../lib/board";
+import { useDeviceLink } from "../lib/useDeviceLink";
 
 interface Props {
   /** 二维码里编码的网址（手机扫码后打开） */
@@ -39,24 +19,43 @@ interface Props {
 }
 
 export default function Site({ qrUrl, onCaptionClick }: Props) {
-  const [data, setData] = useState<Data>(load);
+  const [data, setData] = useState<BoardData>(loadBoard);
   const [msg, setMsg] = useState("");
 
+  // 自动保存
   useEffect(() => {
-    try {
-      localStorage.setItem(KEY, JSON.stringify(data));
-    } catch {
-      /* ignore */
-    }
+    saveBoard(data);
   }, [data]);
 
-  const set = (patch: Partial<Data>) => setData((d) => ({ ...d, ...patch }));
+  // 多个标签页之间同步；模拟器里的“模拟按键”也通过事件传进来
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === STORAGE_KEY) setData(loadBoard());
+    };
+    const onPress = (e: Event) => {
+      const delta = Number((e as CustomEvent<{ delta?: number }>).detail?.delta) || 1;
+      setData((d) => ({ ...d, now: addToNow(d.now, delta) }));
+    };
+    window.addEventListener("storage", onStorage);
+    window.addEventListener("board-press", onPress);
+    return () => {
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener("board-press", onPress);
+    };
+  }, []);
+
+  // ESP32 按键：按一下“现在”+1，长按连加
+  const link = useDeviceLink((session, count, retained) =>
+    setData((d) => applyDevicePress(d, session, count, retained))
+  );
+
+  const set = (patch: Partial<BoardData>) => setData((d) => ({ ...d, ...patch }));
 
   /** 确认：把“现在”的数字累加到“当前生产数”，然后“现在”清零 */
   const confirm = () => {
     const n = Number(data.now);
     if (!data.now || !Number.isFinite(n) || n <= 0) {
-      setMsg("请先在“现在”里输入大于 0 的数量");
+      setMsg("请先让“现在”大于 0（按键或手动输入）");
       return;
     }
     const next = data.current + n;
@@ -66,17 +65,29 @@ export default function Site({ qrUrl, onCaptionClick }: Props) {
   };
 
   const caption = "进入复制代码界面";
+  const pill =
+    !link.server
+      ? { cls: "bad", text: "未连接服务器" }
+      : link.device === "online"
+        ? { cls: "ok", text: "按键设备在线" }
+        : { cls: "wait", text: "已连接 · 等待按键设备" };
 
   return (
-    <div className="site p-2 sm:p-3">
+    <div className="site">
       <div className="site-inner">
-        {onCaptionClick ? (
-          <button type="button" className="site-caption" onClick={onCaptionClick}>
-            {caption}
-          </button>
-        ) : (
-          <div className="site-caption">{caption}</div>
-        )}
+        <div className="site-head">
+          {onCaptionClick ? (
+            <button type="button" className="site-caption" onClick={onCaptionClick}>
+              {caption}
+            </button>
+          ) : (
+            <div className="site-caption">{caption}</div>
+          )}
+          <div className={`link-pill ${pill.cls}`} role="status">
+            <i className="dot" />
+            {pill.text}
+          </div>
+        </div>
 
         <div className="frame">
           <span className="frame-border" />
@@ -147,7 +158,7 @@ export default function Site({ qrUrl, onCaptionClick }: Props) {
               tabIndex={-1}
               inputMode="none"
               aria-readonly="true"
-              title="当前生产数不能手动填写，请在“现在”输入后点击确认"
+              title="当前生产数不能手动填写，请在“现在”累加后点击确认"
             />
           </div>
 
@@ -168,14 +179,16 @@ export default function Site({ qrUrl, onCaptionClick }: Props) {
             />
           </div>
 
-          <button type="button" className="btn-ok" onClick={confirm}>
-            确认
-          </button>
+          <div className="foot">
+            <p className="site-msg" role="status">
+              {msg}
+            </p>
+            <button type="button" className="btn-ok" onClick={confirm}>
+              确认
+            </button>
+          </div>
         </div>
       </div>
-      <p className="site-msg" role="status">
-        {msg}
-      </p>
     </div>
   );
 }
