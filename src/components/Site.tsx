@@ -27,7 +27,7 @@ export default function Site({ qrUrl, onCaptionClick }: Props) {
     saveBoard(data);
   }, [data]);
 
-  // 多个标签页之间同步；模拟器里的“模拟按键”也通过事件传进来
+  // 多个标签页之间同步；模拟器里的“模拟传感器”也通过事件传进来
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === STORAGE_KEY) setData(loadBoard());
@@ -44,7 +44,7 @@ export default function Site({ qrUrl, onCaptionClick }: Props) {
     };
   }, []);
 
-  // ESP32 按键：按一下“现在”+1，长按连加
+  // ESP32 传感器：A、B 两个光电对射同时遮光一次，“现在”+1
   const link = useDeviceLink((session, count, retained) =>
     setData((d) => applyDevicePress(d, session, count, retained))
   );
@@ -55,7 +55,7 @@ export default function Site({ qrUrl, onCaptionClick }: Props) {
   const confirm = () => {
     const n = Number(data.now);
     if (!data.now || !Number.isFinite(n) || n <= 0) {
-      setMsg("请先让“现在”大于 0（按键或手动输入）");
+      setMsg("请先让“现在”大于 0（传感器计数或手动输入）");
       return;
     }
     const next = data.current + n;
@@ -69,8 +69,8 @@ export default function Site({ qrUrl, onCaptionClick }: Props) {
     !link.server
       ? { cls: "bad", text: "未连接服务器" }
       : link.device === "online"
-        ? { cls: "ok", text: "按键设备在线" }
-        : { cls: "wait", text: "已连接 · 等待按键设备" };
+        ? { cls: "ok", text: "传感器设备在线" }
+        : { cls: "wait", text: "已连接 · 等待传感器设备" };
 
   return (
     <div className="site">
