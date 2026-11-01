@@ -7,12 +7,12 @@ export type DeviceState = "online" | "offline" | "unknown";
 export interface LinkState {
   /** 是否已连上至少一个 MQTT 服务器 */
   server: boolean;
-  /** ESP32 按键设备是否在线 */
+  /** ESP32 传感器设备是否在线 */
   device: DeviceState;
 }
 
 /**
- * 订阅 ESP32 按键设备。每收到一次按键数据，就调用 onPress(设备开机编号, 累计次数, 是否为旧消息)。
+ * 订阅 ESP32 传感器设备。每收到一次计数数据，就调用 onPress(设备开机编号, 累计次数, 是否为旧消息)。
  */
 export function useDeviceLink(
   onPress: (session: string, count: number, retained: boolean) => void
