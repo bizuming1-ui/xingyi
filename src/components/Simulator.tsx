@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import type { PointerEvent } from "react";
 import Site from "./Site";
 import CodeViewer from "./CodeViewer";
 import { copyText } from "../lib/clipboard";
 import { normalizeSiteUrl } from "../lib/url";
-import { GITHUB_PAGES_URL, HOLD_DELAY_MS, holdInterval } from "../lib/config";
+import { CLEAR_MS, CONFIRM_MS, GITHUB_PAGES_URL, SENSOR_A_PIN, SENSOR_B_PIN } from "../lib/config";
+import { initialSensorState, stepSensors, type SensorState } from "../lib/sensorLogic";
 import type { SourceFile } from "../lib/sourceList";
 
 interface Props {
@@ -15,54 +15,82 @@ interface Props {
   onResetUrl: () => void;
 }
 
-/** 模拟 ESP32 的按键：按一下 +1，按住 0.4 秒后连加（节奏和固件一致），用来在没有硬件时测试看板 */
-function VirtualButton() {
-  const timer = useRef<number | undefined>(undefined);
-  const start = useRef(0);
-  const [down, setDown] = useState(false);
+/**
+ * 模拟两个光电对射传感器（和固件同一套判定）：
+ * 点“传感器 A / B”切换遮光状态；A、B 同时遮光 -> “现在”+1，必须都通光后才能再次计数。
+ * “模拟物体通过”会自动完成一次：挡 A -> 挡 B（同时遮光）-> 放开 A -> 放开 B。
+ */
+function VirtualSensors() {
+  const [a, setA] = useState(false);
+  const [b, setB] = useState(false);
+  const [n, setN] = useState(0);
+  const st = useRef<SensorState>(initialSensorState());
+  const level = useRef({ a: false, b: false });
+  const timers = useRef<number[]>([]);
 
-  const fire = () =>
-    window.dispatchEvent(new CustomEvent("board-press", { detail: { delta: 1 } }));
-
-  const loop = () => {
-    fire();
-    timer.current = window.setTimeout(loop, holdInterval(Date.now() - start.current));
+  const apply = (na: boolean, nb: boolean) => {
+    level.current = { a: na, b: nb };
+    setA(na);
+    setB(nb);
   };
 
-  const press = (e: PointerEvent<HTMLButtonElement>) => {
-    e.currentTarget.setPointerCapture(e.pointerId);
-    window.clearTimeout(timer.current);
-    start.current = Date.now();
-    setDown(true);
-    fire();
-    timer.current = window.setTimeout(loop, HOLD_DELAY_MS);
+  useEffect(() => {
+    // 模拟固件检测任务：每 1 毫秒判定一次
+    const id = window.setInterval(() => {
+      const r = stepSensors(
+        st.current,
+        level.current.a,
+        level.current.b,
+        performance.now(),
+        CONFIRM_MS,
+        CLEAR_MS
+      );
+      st.current = r.state;
+      if (r.counted) {
+        setN((x) => x + 1);
+        window.dispatchEvent(new CustomEvent("board-press", { detail: { delta: 1 } }));
+      }
+    }, 1);
+    return () => {
+      window.clearInterval(id);
+      timers.current.forEach((t) => window.clearTimeout(t));
+    };
+  }, []);
+
+  const pass = () => {
+    timers.current.forEach((t) => window.clearTimeout(t));
+    const L = level.current;
+    const steps: [number, boolean, boolean][] = [
+      [0, true, L.b],
+      [120, true, true],
+      [320, false, true],
+      [440, false, false],
+    ];
+    timers.current = steps.map(([ms, x, y]) => window.setTimeout(() => apply(x, y), ms));
   };
 
-  const release = () => {
-    window.clearTimeout(timer.current);
-    setDown(false);
-  };
-
-  useEffect(() => () => window.clearTimeout(timer.current), []);
+  const cls = (on: boolean) =>
+    "select-none rounded-md border px-2.5 py-1.5 text-sm font-semibold " +
+    (on
+      ? "border-rose-700 bg-rose-600 text-white"
+      : "border-emerald-500 bg-emerald-50 text-emerald-800 hover:bg-emerald-100");
 
   return (
-    <button
-      type="button"
-      onPointerDown={press}
-      onPointerUp={release}
-      onPointerCancel={release}
-      onLostPointerCapture={release}
-      onContextMenu={(e) => e.preventDefault()}
-      title="模拟 ESP32 按键：按一下 +1，按住连加"
-      className={
-        "touch-none select-none rounded-md border px-3 py-1.5 text-sm font-semibold " +
-        (down
-          ? "border-emerald-700 bg-emerald-600 text-white"
-          : "border-emerald-500 bg-emerald-50 text-emerald-800 hover:bg-emerald-100")
-      }
-    >
-      ⏺ 模拟按键
-    </button>
+    <div className="flex items-center gap-1.5" title="模拟两个光电对射传感器：A、B 同时遮光 -> 现在 +1">
+      <button type="button" className={cls(a)} onClick={() => apply(!level.current.a, level.current.b)}>
+        A·GPIO{SENSOR_A_PIN} {a ? "遮光" : "通光"}
+      </button>
+      <button type="button" className={cls(b)} onClick={() => apply(level.current.a, !level.current.b)}>
+        B·GPIO{SENSOR_B_PIN} {b ? "遮光" : "通光"}
+      </button>
+      <button
+        type="button"
+        onClick={pass}
+        className="rounded-md border border-sky-500 bg-sky-50 px-2.5 py-1.5 text-sm font-semibold text-sky-800 hover:bg-sky-100"
+      >
+        ▶ 模拟物体通过{n > 0 ? `（已计 ${n}）` : ""}
+      </button>
+    </div>
   );
 }
 
@@ -165,7 +193,7 @@ export default function Simulator({ siteUrl, hasOverride, files, onSaveUrl, onRe
           >
             复制网址
           </button>
-          <VirtualButton />
+          <VirtualSensors />
           <button
             onClick={() => setView(view === "code" ? "site" : "code")}
             className="rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500 active:scale-[0.98]"
