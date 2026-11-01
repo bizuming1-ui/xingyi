@@ -1,13 +1,13 @@
-/** 生产看板的数据模型、本地存储，以及“按键设备累计值 -> 现在 +N”的换算逻辑 */
+/** 生产看板的数据模型、本地存储，以及“传感器设备累计值 -> 现在 +N”的换算逻辑 */
 
 export interface BoardData {
   order: string; // 生产单
   product: string; // 产品
   total: string; // 生产总数
   current: number; // 当前生产数（只读，只能通过“确认”增加）
-  now: string; // 现在（按键 +1 / 长按连加 / 手动输入）
-  devSession: string; // 最近一次见到的按键设备“开机编号”
-  devCount: number; // 该设备已经统计到的累计按键次数
+  now: string; // 现在（传感器 +1 / 长按连加 / 手动输入）
+  devSession: string; // 最近一次见到的传感器设备“开机编号”
+  devCount: number; // 该设备已经统计到的累计计数次数
 }
 
 export const STORAGE_KEY = "production-board-v1";
@@ -58,13 +58,13 @@ export function addToNow(now: string, delta: number): string {
 }
 
 /**
- * 处理按键设备发来的“累计按键次数”。
+ * 处理传感器设备发来的“累计计数次数”。
  * 为什么用累计值而不是“+1 事件”？——网络丢一个包也没关系，下一个包自带正确的总数，
  * 重复收到同一个包（两个服务器、两个标签页）也不会多算，所以不会漏数、不会重复数。
  *
  *  - 设备开机编号(session)没见过 + 是服务器保存的旧消息(retained)：只记基准，不加（避免打开网页时把历史次数加进来）
  *  - 设备开机编号没见过 + 是实时消息：设备刚开机从 0 开始，整个累计值都是新增的
- *  - 设备开机编号见过：只加上新增的差值（也能补回网页断线期间漏掉的按键）
+ *  - 设备开机编号见过：只加上新增的差值（也能补回网页断线期间漏掉的计数）
  */
 export function applyDevicePress(
   d: BoardData,
