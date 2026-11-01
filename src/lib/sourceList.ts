@@ -21,31 +21,47 @@ const EXISTING = new Set([
   "README.md",
   "index.html",
   "package.json",
-  "tsconfig.json",
-  "vite.config.ts",
+  "platformio/platformio.ini",
+  "platformio/src/config.h",
+  "platformio/src/main.cpp",
   "src/App.tsx",
-  "src/main.tsx",
-  "src/index.css",
-  "src/vite-env.d.ts",
+  "src/board.css",
   "src/components/CodeViewer.tsx",
   "src/components/Simulator.tsx",
   "src/components/Site.tsx",
+  "src/index.css",
+  "src/lib/board.ts",
   "src/lib/clipboard.ts",
+  "src/lib/config.ts",
+  "src/lib/mqttLite.ts",
+  "src/lib/sourceList.ts",
+  "src/lib/sources.ts",
   "src/lib/url.ts",
+  "src/lib/useDeviceLink.ts",
+  "src/main.tsx",
   "src/utils/cn.ts",
+  "src/vite-env.d.ts",
+  "tsconfig.json",
+  "vite.config.ts",
 ]);
 
 /** 已有文件中，内容和本次开发完全一致的（无需再复制） */
 const SAME = new Set<string>([
+  ".github/workflows/deploy.yml",
   ".gitignore",
   "index.html",
   "package.json",
+  "src/App.tsx",
+  "src/board.css",
+  "src/index.css",
+  "src/lib/clipboard.ts",
+  "src/lib/mqttLite.ts",
+  "src/lib/url.ts",
+  "src/main.tsx",
+  "src/utils/cn.ts",
+  "src/vite-env.d.ts",
   "tsconfig.json",
   "vite.config.ts",
-  "src/vite-env.d.ts",
-  "src/lib/clipboard.ts",
-  "src/lib/url.ts",
-  "src/utils/cn.ts",
 ]);
 
 const ORDER_GITHUB = [
@@ -68,6 +84,7 @@ const ORDER_GITHUB = [
   "src/lib/board.ts",
   "src/lib/mqttLite.ts",
   "src/lib/useDeviceLink.ts",
+  "src/lib/sensorLogic.ts",
   "src/lib/sourceList.ts",
   "src/lib/sources.ts",
   "src/lib/url.ts",
@@ -82,13 +99,13 @@ export function buildSourceList(raw: Record<string, string>): SourceFile[] {
   for (const [key, text] of Object.entries(raw)) {
     const repoPath = key.replace(/^\/+/, "");
     const content = text.replace(/\r\n/g, "\n");
-    if (repoPath.startsWith("firmware/")) {
+    if (repoPath.startsWith("platformio/")) {
       out.push({
         group: "platformio",
-        path: repoPath.slice("firmware/".length),
+        path: repoPath.slice("platformio/".length),
         repoPath,
         content,
-        status: "new",
+        status: SAME.has(repoPath) ? "same" : EXISTING.has(repoPath) ? "changed" : "new",
       });
     } else {
       out.push({
