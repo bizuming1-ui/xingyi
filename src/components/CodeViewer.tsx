@@ -18,8 +18,8 @@ const TABS: { id: Group; title: string; hint: string[] }[] = [
     title: "② 复制到 VS Code PlatformIO 的代码",
     hint: [
       "VS Code → PlatformIO Home → New Project：Board 选 Espressif ESP32-S3-DevKitC-1，Framework 选 Arduino。",
-      "用下面 3 个文件覆盖/新建：platformio.ini、src/config.h（先改 WiFi 名称和密码）、src/main.cpp。",
-      "按键一端接 GND，另一端接 GPIO4。点 PlatformIO 的 Upload 上传，Monitor 查看串口日志。",
+      "用下面 3 个文件覆盖/新建：platformio.ini、src/config.h（先改 WiFi 名称和密码；若没挡就计数，把 SENSOR_BLOCKED_LEVEL 改成 LOW）、src/main.cpp。",
+      "两个传感器：VCC 接 3V3（不要接 5V）、GND 接 GND，OUT 分别接 GPIO4（A）和 GPIO5（B）。点 Upload 上传，Monitor 查看串口日志。",
     ],
   },
 ];
@@ -88,7 +88,7 @@ export default function CodeViewer({ files }: { files: SourceFile[] }) {
 
       {list.length === 0 || !file ? (
         <div className="p-6 text-sm text-slate-400">
-          没有找到这一类的文件（如果是 PlatformIO：请把仓库里的 firmware/ 文件夹也一起上传）。
+          没有找到这一类的文件（如果是 PlatformIO：请把仓库里的 platformio/ 文件夹也一起上传）。
         </div>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col md:flex-row">
@@ -139,7 +139,7 @@ export default function CodeViewer({ files }: { files: SourceFile[] }) {
                 target="_blank"
                 rel="noreferrer"
                 className="rounded-md bg-slate-600 px-2.5 py-1.5 text-xs font-semibold hover:bg-slate-500"
-                title={tab === "platformio" ? "可选：把固件也存进仓库" : undefined}
+                title={tab === "platformio" ? "把固件也存进仓库（网站“复制代码”才能显示它）" : undefined}
               >
                 {githubLink(file).label} ↗
               </a>
