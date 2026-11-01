@@ -1,18 +1,73 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import type { PointerEvent } from "react";
 import Site from "./Site";
 import CodeViewer from "./CodeViewer";
 import { copyText } from "../lib/clipboard";
 import { normalizeSiteUrl } from "../lib/url";
+import { GITHUB_PAGES_URL, HOLD_DELAY_MS, holdInterval } from "../lib/config";
+import type { SourceFile } from "../lib/sourceList";
 
 interface Props {
   siteUrl: string;
   hasOverride: boolean;
+  files: SourceFile[];
   onSaveUrl: (url: string) => void;
   onResetUrl: () => void;
 }
 
+/** 模拟 ESP32 的按键：按一下 +1，按住 0.4 秒后连加（节奏和固件一致），用来在没有硬件时测试看板 */
+function VirtualButton() {
+  const timer = useRef<number | undefined>(undefined);
+  const start = useRef(0);
+  const [down, setDown] = useState(false);
+
+  const fire = () =>
+    window.dispatchEvent(new CustomEvent("board-press", { detail: { delta: 1 } }));
+
+  const loop = () => {
+    fire();
+    timer.current = window.setTimeout(loop, holdInterval(Date.now() - start.current));
+  };
+
+  const press = (e: PointerEvent<HTMLButtonElement>) => {
+    e.currentTarget.setPointerCapture(e.pointerId);
+    window.clearTimeout(timer.current);
+    start.current = Date.now();
+    setDown(true);
+    fire();
+    timer.current = window.setTimeout(loop, HOLD_DELAY_MS);
+  };
+
+  const release = () => {
+    window.clearTimeout(timer.current);
+    setDown(false);
+  };
+
+  useEffect(() => () => window.clearTimeout(timer.current), []);
+
+  return (
+    <button
+      type="button"
+      onPointerDown={press}
+      onPointerUp={release}
+      onPointerCancel={release}
+      onLostPointerCapture={release}
+      onContextMenu={(e) => e.preventDefault()}
+      title="模拟 ESP32 按键：按一下 +1，按住连加"
+      className={
+        "touch-none select-none rounded-md border px-3 py-1.5 text-sm font-semibold " +
+        (down
+          ? "border-emerald-700 bg-emerald-600 text-white"
+          : "border-emerald-500 bg-emerald-50 text-emerald-800 hover:bg-emerald-100")
+      }
+    >
+      ⏺ 模拟按键
+    </button>
+  );
+}
+
 /** 浏览器模拟器：标签页 + 地址栏 + “复制代码”按钮 + 页面内容 */
-export default function Simulator({ siteUrl, hasOverride, onSaveUrl, onResetUrl }: Props) {
+export default function Simulator({ siteUrl, hasOverride, files, onSaveUrl, onResetUrl }: Props) {
   const [view, setView] = useState<"site" | "code">("site");
   const [draft, setDraft] = useState(siteUrl);
   const [tip, setTip] = useState("");
@@ -31,11 +86,9 @@ export default function Simulator({ siteUrl, hasOverride, onSaveUrl, onResetUrl 
     flash("✅ 网址已保存，二维码已更新");
   };
 
-  const isPublic = hasOverride || /\.github\.io$/i.test(window.location.hostname);
-
   return (
-    <div className="flex h-dvh flex-col p-1 sm:p-4">
-      <div className="mx-auto flex min-h-0 w-full max-w-[1400px] flex-1 flex-col overflow-hidden rounded-xl border border-slate-400 bg-white shadow-2xl">
+    <div className="flex h-dvh flex-col p-1 sm:p-3">
+      <div className="mx-auto flex min-h-0 w-full max-w-[1500px] flex-1 flex-col overflow-hidden rounded-xl border border-slate-400 bg-white shadow-2xl">
         {/* 标签栏 */}
         <div className="flex items-end gap-2 bg-slate-300 px-3 pt-2">
           <div className="flex items-center gap-2 rounded-t-lg bg-slate-100 px-3 py-1.5 text-sm">
@@ -112,6 +165,7 @@ export default function Simulator({ siteUrl, hasOverride, onSaveUrl, onResetUrl 
           >
             复制网址
           </button>
+          <VirtualButton />
           <button
             onClick={() => setView(view === "code" ? "site" : "code")}
             className="rounded-md bg-indigo-600 px-4 py-1.5 text-sm font-semibold text-white hover:bg-indigo-500 active:scale-[0.98]"
@@ -120,21 +174,44 @@ export default function Simulator({ siteUrl, hasOverride, onSaveUrl, onResetUrl 
           </button>
         </div>
 
-        {(tip || !isPublic) && (
-          <div className="border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-xs text-amber-800">
-            {tip ||
-              "提示：当前网址是预览/本地地址，手机可能打不开。把代码上传到 GitHub Pages 后，将线上网址粘贴到上方地址栏并点“保存”，二维码就会指向线上网站（步骤见“复制代码”里的 README.md）。"}
-          </div>
-        )}
+        {/* 提示条：正式网址 */}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-amber-200 bg-amber-50 px-3 py-1 text-xs text-amber-900">
+          {tip ? (
+            <span>{tip}</span>
+          ) : (
+            <>
+              <span>GitHub 正式网址：</span>
+              <a
+                href={GITHUB_PAGES_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="font-mono text-indigo-700 underline"
+              >
+                {GITHUB_PAGES_URL}
+              </a>
+              <button
+                className="rounded bg-amber-200 px-1.5 py-0.5 hover:bg-amber-300"
+                onClick={async () =>
+                  flash((await copyText(GITHUB_PAGES_URL)) ? "✅ 正式网址已复制" : "❌ 复制失败")
+                }
+              >
+                复制
+              </button>
+              <span className="text-amber-700">（把“复制代码”里的文件更新到 GitHub 后即可打开）</span>
+            </>
+          )}
+        </div>
 
-        {/* 页面内容 */}
-        <div className="min-h-0 flex-1 overflow-auto bg-white">
+        {/* 页面内容：看板固定铺满窗口，不需要滚动 */}
+        <div className="relative min-h-0 flex-1 overflow-hidden bg-white">
           {view === "site" ? (
-            <div className="mx-auto max-w-[1340px]">
-              <Site qrUrl={siteUrl} onCaptionClick={() => setView("code")} />
+            <div className="stage">
+              <div className="stage-fit">
+                <Site qrUrl={siteUrl} onCaptionClick={() => setView("code")} />
+              </div>
             </div>
           ) : (
-            <CodeViewer />
+            <CodeViewer files={files} />
           )}
         </div>
       </div>
